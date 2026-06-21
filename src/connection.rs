@@ -15,10 +15,13 @@ pub struct Connection {
 
 impl Connection {
     pub fn new(stream: TcpStream) -> Self {
-        // function new() can instantiate using a stream
+        // Instantiates a new Connection
+        // Input: stream as a TcpStream
+        // Output: a Connection object
+        // Output: stream as a TcpStream
+        // Output: buffer as a chuck of memory being 4 KB
         Self {
             stream,
-            // assign 4KB of memory for the buffer
             buffer: BytesMut::with_capacity(4096),
         }
     }
@@ -30,10 +33,7 @@ impl Connection {
     /// is in the buffer, or if the underlying TCP stream encounters an I/O failure.
     pub async fn read_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error>> {
         // Input: a reference to Connection, allowing us to modify its buffer.
-        // Output: Option<frame> gives Some(Frame) or None,
-        // Output: Box<dyn Error> wraps all possible errors.
-        // Output: The final result shall be either Ok(Some(Frame)),
-        // Output: Ok(None), or Error of a certain kind.
+        // Output: either Ok(Some(Frame)), Ok(None), or Error of a certain kind.
 
         loop {
             // Step 1: try to read the current buffer and form a frame object.
@@ -64,12 +64,7 @@ impl Connection {
     /// a full frame, or any other failure.
     fn parse_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error>> {
         // Input: a reference to Connection, allowing us to modify its buffer.
-        // Output: The final result shall be either Ok(Some(Frame)) for a successful read,
-        // Ok(None) for an ongoing reading as in the continue logic, or Error of a certain kind.
-        /*let Ok(()) == self.buffer.Frame::check()?;
-        if let Some(frame) == self.buffer.Frame::parse()? {
-            Ok(Some(frame))
-        }*/
+        // Output: either Ok(Some(Frame)), Ok(None), or Error of a certain kind.
 
         // Step 1: create a cursor to access the buffer
         let mut cursor = Cursor::new(&self.buffer[..]);
@@ -78,13 +73,14 @@ impl Connection {
         match Frame::check(&mut cursor) {
             Ok(()) => {
                 // Step 3: apply Frame::parse() to the cursor
-                // Step 3.1 reset cursor from the beginning
+                // Step 3.1 reset cursor's position to the cursor's head
                 cursor.set_position(0);
-                // Step 3.2 parse the cursor
+                // Step 3.2 parse the frame using the cursor
                 let frame = Frame::parse(&mut cursor)?;
-                // Step 3.3 get length of bytes read and update buffer
-                let length = usize::try_from(cursor.position()).unwrap();
-                self.buffer.advance(length);
+                // Step 3.3 get length of bytes read and update the buffer
+                // by removing exact as many bytes read
+                self.buffer
+                    .advance(usize::try_from(cursor.position()).unwrap());
                 // Step 3.4 return the frame
                 Ok(Some(frame))
             }
