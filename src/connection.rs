@@ -44,8 +44,7 @@ impl Connection {
 
             // Step 2: we are here means the buffer does not contain a full frame.
             // try to read from network and re-run Step 1
-            let bytes_read = self.stream.read_buf(&mut self.buffer).await?;
-            if bytes_read == 0 {
+            if self.stream.read_buf(&mut self.buffer).await? == 0 {
                 if self.buffer.is_empty() {
                     // This is a successful disconnect. Quit the loop.
                     return Ok(None);
@@ -95,7 +94,7 @@ mod tests {
 
     use super::*;
     //use std::error::Error;
-    use tokio::net::TcpListener;
+    use tokio::{io::AsyncWriteExt, net::TcpListener};
 
     #[tokio::test]
     async fn test_connection_new() -> Result<(), Box<dyn Error>> {
@@ -109,6 +108,66 @@ mod tests {
         // test the new() method
         let test_connection = Connection::new(test_stream);
         assert_eq!(test_connection.buffer.capacity(), 4096);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame() -> Result<(), Box<dyn Error>> {
+        // Step 1: environment setup
+        // create a TCP listener (a rounter or switch)
+        let test_listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let test_addr = test_listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut test_client = TcpStream::connect(test_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (test_server, _) = test_listener.accept().await?;
+        // create a connection from the server
+        let mut test_connection = Connection::new(test_server);
+
+        // Test 1: Valid full simple string
+        // Step 2: write data to the client
+        test_client.write_all(b"+Hello, World!\r\n").await?;
+        // Step 3: read data from the connection
+        let test_frame = test_connection.read_frame().await?;
+        assert_eq!(test_frame, Some(Frame::Simple("Hello, World!".to_string())));
+
+        // Test 2: Valid full array, sent in parts
+        // Step 2: write data to the client
+        test_client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        test_client.write_all(b"$3\r\nbar\r\n").await?;
+
+        /*
+        // We may have to write the concurrentcy mannually, in order to
+        // force the server to read the first part, hit the Incomplete error,
+        // and wake up when Part B arrives,
+
+        let mut background_client = test_client.try_clone().unwrap();
+        tokio::spawn(async move {
+            background_client.write_all(b"*2\r\n$3\r\nfoo\r\n").await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            background_client.write_all(b"$3\r\nbar\r\n").await.unwrap();
+        });
+        */
+
+        // Step 3: read data from the connection
+        let test_frame = test_connection.read_frame().await?;
+        assert_eq!(
+            test_frame,
+            Some(Frame::Array(vec![
+                Frame::Bulk("foo".as_bytes().into()),
+                Frame::Bulk("bar".as_bytes().into())
+            ]))
+        );
+
+        // Test 3: Valid disconnection
+        // Step 2: close the connection
+        drop(test_client);
+        // Step 3: read data from the connection
+        let test_frame = test_connection.read_frame().await?;
+        assert_eq!(test_frame, None);
 
         Ok(())
     }
