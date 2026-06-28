@@ -49,7 +49,7 @@ impl Frame {
                     }
                     l if l >= 0 => {
                         let length_u = usize::try_from(length)
-                            .map_err(|_| Error::Other("Wrong message: Length overflow".into()))?;
+                            .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
                         // Step 4.3 check remaining buffer length
                         if src.remaining() >= length_u {
                             // Step 4.4: advance cursor and compare to \r\n
@@ -60,7 +60,7 @@ impl Frame {
                             }
                             // this is an invalid bulk string not ending with \r\n
                             return Err(Error::Other(
-                                "Wrong message: Invalid ending for bulk string".into(),
+                                "Wrong message: Invalid ending for bulk string",
                             ));
                         }
                         // this is an incomplete bulk string
@@ -69,7 +69,7 @@ impl Frame {
                     _ => {
                         // this is a bulk string with negative length
                         Err(Error::Other(
-                            "Wrong message: Invalid length for bulk string".into(),
+                            "Wrong message: Invalid length for bulk string",
                         ))
                     }
                 }
@@ -97,14 +97,14 @@ impl Frame {
                     }
                     _ => {
                         // this is a array with negative length
-                        Err(Error::Other("Wrong message: Invalid size for array".into()))
+                        Err(Error::Other("Wrong message: Invalid size for array"))
                     }
                 }
             }
 
             _ => {
                 // this is a frame not starting with =-:$*
-                Err(Error::Other("Wrong message: Invalid first byte".into()))
+                Err(Error::Other("Wrong message: Invalid first byte"))
             }
         }
     }
@@ -124,7 +124,7 @@ impl Frame {
             b'+' | b'-' => {
                 let content = Frame::get_line(src)?;
                 let result = String::from_utf8(content.to_vec())
-                    .map_err(|_| Error::Other("Wrong message: Invalid UTF-8".into()))?;
+                    .map_err(|_| Error::Other("Wrong message: Invalid UTF-8"))?;
                 // this is a valid simple or error
                 if first_byte == b'+' {
                     Ok(Frame::Simple(result))
@@ -147,7 +147,7 @@ impl Frame {
                 // Step 4.2: match length of bulk string
                 if length >= 0 {
                     let length_u = usize::try_from(length)
-                        .map_err(|_| Error::Other("Wrong message: Length overflow".into()))?;
+                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
                     // Step 4.3 collect the output
                     let result = Bytes::copy_from_slice(&src.chunk()[..length_u]);
                     // move cursor forward by length + 2
@@ -166,7 +166,10 @@ impl Frame {
                 // Step 5.2: match size of array
                 if size >= 0 {
                     let size_u = usize::try_from(size)
-                        .map_err(|_| Error::Other("Wrong message: Length overflow".into()))?;
+                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                    if size_u >= 1024 {
+                        return Err(Error::Other("Wrong message: size out of memory"));
+                    }
                     // Step 5.3 deal with recursion
                     let mut result = Vec::with_capacity(size_u);
                     for _ in 0..size {
@@ -180,7 +183,7 @@ impl Frame {
 
             _ => {
                 // a cursor has passed check() should never reach here
-                Err(Error::Other("Wrong message: Invalid first byte".into()))
+                Err(Error::Other("Wrong message: Invalid first byte"))
             }
         }
     }
@@ -192,7 +195,7 @@ impl Frame {
         // Step 1: get the current content and position of the Cursor
         let line = src.chunk();
         let pos = usize::try_from(src.position())
-            .map_err(|_| Error::Other("Wrong message: Length overflow".into()))?;
+            .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
 
         // Step 2: scan the content and try to find the first "\r"
         for index in 0..line.len() {
@@ -211,9 +214,7 @@ impl Frame {
                         return Ok(result);
                     }
                     // This is for a wrong line like "dolor \rsit"
-                    return Err(Error::Other(
-                        "Wrong message: '\r' not followed by '\n'".into(),
-                    ));
+                    return Err(Error::Other("Wrong message: '\r' not followed by '\n'"));
                 }
                 // This is for an incomplete line like "Lorem Ipsum\r"
                 return Err(Error::Incomplete);
@@ -232,7 +233,7 @@ impl Frame {
 
         // Step 2: check if the slice is empty, and set up variables
         if !line.has_remaining() {
-            return Err(Error::Other("Wrong message: Empty line".into()));
+            return Err(Error::Other("Wrong message: Empty line"));
         }
         let mut is_pos = 1i64;
         let mut result = 0i64;
@@ -243,12 +244,12 @@ impl Frame {
             45 => is_pos = -1,
             48..=57 => result = i64::from(first_byte - 48),
             _ => {
-                return Err(Error::Other("Wrong message: Not a number".into()));
+                return Err(Error::Other("Wrong message: Not a number"));
             }
         }
         if !line.has_remaining() && (is_pos == -1) {
             // This is nothing but a single "-\r\n"
-            return Err(Error::Other("Wrong message: Not a number".into()));
+            return Err(Error::Other("Wrong message: Not a number"));
         }
 
         // Step 4: handle the remaining bytes
@@ -260,7 +261,7 @@ impl Frame {
                     result += i64::from(byte - 48);
                 }
                 _ => {
-                    return Err(Error::Other("Wrong message: Not a number".into()));
+                    return Err(Error::Other("Wrong message: Not a number"));
                 }
             }
         }
@@ -271,7 +272,7 @@ impl Frame {
 #[derive(Debug)]
 pub enum Error {
     Incomplete,
-    Other(String),
+    Other(&'static str),
 }
 
 impl std::error::Error for Error {}
