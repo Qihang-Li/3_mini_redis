@@ -397,11 +397,11 @@ mod tests {
     #[test]
     fn test_check() {
         // Test 1: Valid simple string
-        let valid_simple = &b"+hello world\r\n"[..];
+        let valid_simple = &b"+Hello, world!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
         let simple_result = Frame::check(&mut simple_cursor);
         assert!(simple_result.is_ok());
-        assert_eq!(simple_cursor.position(), 14);
+        assert_eq!(simple_cursor.position(), 16);
 
         // Test 2: Valid error
         let valid_error = &b"-Error 404 Not Found\r\n"[..];
@@ -520,14 +520,14 @@ mod tests {
     #[test]
     fn test_parse() {
         // Test 1: Valid simple string
-        let valid_simple = &b"+hello world\r\n"[..];
+        let valid_simple = &b"+Hello, World!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
         let simple_result = Frame::parse(&mut simple_cursor);
         assert_eq!(
             simple_result.unwrap(),
-            Frame::Simple("hello world".to_string())
+            Frame::Simple("Hello, World!".to_string())
         );
-        assert_eq!(simple_cursor.position(), 14);
+        assert_eq!(simple_cursor.position(), 16);
 
         // Test 2: Valid error
         let valid_error = &b"-Error 404 Not Found\r\n"[..];
