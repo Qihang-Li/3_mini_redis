@@ -2,6 +2,22 @@ use bytes::Buf;
 use bytes::Bytes;
 use std::io::Cursor;
 
+#[derive(Debug)]
+pub enum Error {
+    Incomplete,
+    Other(&'static str),
+}
+
+impl std::error::Error for Error {}
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Incomplete => write!(f, "stream ended early"),
+            Error::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Frame {
     Simple(String),
@@ -32,7 +48,7 @@ impl Frame {
         match first_byte {
             // Step 3: deal with simple, error, or integer
             b'+' | b'-' | b':' => {
-                let _result = Frame::get_line(src)?;
+                let _bytes = Frame::get_line(src)?;
                 // this is a valid simple, error, or integer
                 Ok(())
             }
@@ -269,28 +285,12 @@ impl Frame {
     }
 }
 
-#[derive(Debug)]
-pub enum Error {
-    Incomplete,
-    Other(&'static str),
-}
-
-impl std::error::Error for Error {}
-impl std::fmt::Display for Error {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Error::Incomplete => write!(f, "stream ended early"),
-            Error::Other(err) => write!(f, "{err}"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn test_frame_init() {
+    fn test_frame_new() {
         let _frames: [Frame; 6] = [
             Frame::Simple(String::from("Hello, World!")),
             Frame::Error(String::from("404 Not Found")),
@@ -306,97 +306,97 @@ mod tests {
     }
 
     #[test]
-    fn test_get_line() {
+    fn test_frame_get_line() {
         // Test 1: Valid clean line
         let valid_line = &b"hello world\r\n"[..];
         let mut valid_cursor = Cursor::new(valid_line);
-        let valid_result = Frame::get_line(&mut valid_cursor);
-        assert_eq!(valid_result.unwrap(), b"hello world");
+        let valid_bytes = Frame::get_line(&mut valid_cursor);
+        assert_eq!(valid_bytes.unwrap(), b"hello world");
         assert_eq!(valid_cursor.position(), 13);
 
         // Test 2: Superfluous pipelined data
         let superfluous_line = &b"2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut superfluous_cursor = Cursor::new(superfluous_line);
-        let superfluous_result = Frame::get_line(&mut superfluous_cursor);
-        assert_eq!(superfluous_result.unwrap(), b"2");
+        let superfluous_bytes = Frame::get_line(&mut superfluous_cursor);
+        assert_eq!(superfluous_bytes.unwrap(), b"2");
         assert_eq!(superfluous_cursor.position(), 3);
 
         // Test 3: Inadequate line
         let inadequate_line = &b"Lorem Ipsum"[..];
         let mut inadequate_cursor = Cursor::new(inadequate_line);
-        let inadequate_result = Frame::get_line(&mut inadequate_cursor);
-        assert!(matches!(inadequate_result, Err(Error::Incomplete)));
+        let inadequate_bytes = Frame::get_line(&mut inadequate_cursor);
+        assert!(matches!(inadequate_bytes, Err(Error::Incomplete)));
         assert_eq!(inadequate_cursor.position(), 0);
 
         // Test 4: Wrong line
         let wrong_line = &b"dolor \rsit"[..];
         let mut wrong_cursor = Cursor::new(wrong_line);
-        let wrong_result = Frame::get_line(&mut wrong_cursor);
-        assert!(matches!(wrong_result, Err(Error::Other(_))));
+        let wrong_bytes = Frame::get_line(&mut wrong_cursor);
+        assert!(matches!(wrong_bytes, Err(Error::Other(_))));
         assert_eq!(wrong_cursor.position(), 0);
     }
 
     #[test]
-    fn test_get_decimal() {
+    fn test_frame_get_decimal() {
         // Test 1: Valid positive number
         let valid_pos = &b"42\r\n"[..];
         let mut valid_pos_cursor = Cursor::new(valid_pos);
-        let valid_pos_result = Frame::get_decimal(&mut valid_pos_cursor);
-        assert_eq!(valid_pos_result.unwrap(), 42i64);
+        let valid_pos_int = Frame::get_decimal(&mut valid_pos_cursor);
+        assert_eq!(valid_pos_int.unwrap(), 42i64);
         assert_eq!(valid_pos_cursor.position(), 4);
 
         // Test 2: Valid negative number
         let valid_neg = &b"-137\r\n"[..];
         let mut valid_neg_cursor = Cursor::new(valid_neg);
-        let valid_neg_result = Frame::get_decimal(&mut valid_neg_cursor);
-        assert_eq!(valid_neg_result.unwrap(), -137i64);
+        let valid_neg_int = Frame::get_decimal(&mut valid_neg_cursor);
+        assert_eq!(valid_neg_int.unwrap(), -137i64);
         assert_eq!(valid_neg_cursor.position(), 6);
 
         // Test 3: Valid single digit number
         let valid_sig = &b"9\r\n"[..];
         let mut valid_sig_cursor = Cursor::new(valid_sig);
-        let valid_sig_result = Frame::get_decimal(&mut valid_sig_cursor);
-        assert_eq!(valid_sig_result.unwrap(), 9i64);
+        let valid_sig_int = Frame::get_decimal(&mut valid_sig_cursor);
+        assert_eq!(valid_sig_int.unwrap(), 9i64);
         assert_eq!(valid_sig_cursor.position(), 3);
 
         // Test 4: Superfluous pipelined data
         let superfluous_num = &b"2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut superfluous_cursor = Cursor::new(superfluous_num);
-        let superfluous_result = Frame::get_decimal(&mut superfluous_cursor);
-        assert_eq!(superfluous_result.unwrap(), 2i64);
+        let superfluous_int = Frame::get_decimal(&mut superfluous_cursor);
+        assert_eq!(superfluous_int.unwrap(), 2i64);
         assert_eq!(superfluous_cursor.position(), 3);
 
         // Test 5: Inadequate line
         let inadequate_num = &b"299792458"[..];
         let mut inadequate_cursor = Cursor::new(inadequate_num);
-        let inadequate_result = Frame::get_decimal(&mut inadequate_cursor);
-        assert!(matches!(inadequate_result, Err(Error::Incomplete)));
+        let inadequate_int = Frame::get_decimal(&mut inadequate_cursor);
+        assert!(matches!(inadequate_int, Err(Error::Incomplete)));
         assert_eq!(inadequate_cursor.position(), 0);
 
         // Test 6: Non-integer line
         let non_num = &b"No. 1729\r\n"[..];
         let mut non_cursor = Cursor::new(non_num);
-        let non_result = Frame::get_decimal(&mut non_cursor);
-        assert!(matches!(non_result, Err(Error::Other(_))));
+        let non_int = Frame::get_decimal(&mut non_cursor);
+        assert!(matches!(non_int, Err(Error::Other(_))));
         assert_eq!(non_cursor.position(), 10);
 
-        // Test 7: only minus sign line
+        // Test 7: Only minus sign line
         let only_min = &b"-\r\n"[..];
         let mut min_cursor = Cursor::new(only_min);
-        let min_result = Frame::get_decimal(&mut min_cursor);
-        assert!(matches!(min_result, Err(Error::Other(_))));
+        let min_int = Frame::get_decimal(&mut min_cursor);
+        assert!(matches!(min_int, Err(Error::Other(_))));
         assert_eq!(min_cursor.position(), 3);
 
-        // Test 8: unexpected minus sign line
+        // Test 8: Unexpected minus sign line
         let wrong_min = &b"42-137\r\n"[..];
         let mut wrong_cursor = Cursor::new(wrong_min);
-        let wrong_result = Frame::get_decimal(&mut wrong_cursor);
-        assert!(matches!(wrong_result, Err(Error::Other(_))));
+        let wrong_int = Frame::get_decimal(&mut wrong_cursor);
+        assert!(matches!(wrong_int, Err(Error::Other(_))));
         assert_eq!(wrong_cursor.position(), 8);
     }
 
     #[test]
-    fn test_check() {
+    fn test_frame_check() {
         // Test 1: Valid simple string
         let valid_simple = &b"+Hello, world!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
@@ -519,13 +519,13 @@ mod tests {
     }
 
     #[test]
-    fn test_parse() {
+    fn test_frame_parse() {
         // Test 1: Valid simple string
         let valid_simple = &b"+Hello, World!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
-        let simple_result = Frame::parse(&mut simple_cursor);
+        let simple_frame = Frame::parse(&mut simple_cursor);
         assert_eq!(
-            simple_result.unwrap(),
+            simple_frame.unwrap(),
             Frame::Simple("Hello, World!".to_string())
         );
         assert_eq!(simple_cursor.position(), 16);
@@ -533,9 +533,9 @@ mod tests {
         // Test 2: Valid error
         let valid_error = &b"-Error 404 Not Found\r\n"[..];
         let mut error_cursor = Cursor::new(valid_error);
-        let error_result = Frame::parse(&mut error_cursor);
+        let error_frame = Frame::parse(&mut error_cursor);
         assert_eq!(
-            error_result.unwrap(),
+            error_frame.unwrap(),
             Frame::Error("Error 404 Not Found".to_string())
         );
         assert_eq!(error_cursor.position(), 22);
@@ -543,40 +543,37 @@ mod tests {
         // Test 3: Valid integer
         let valid_integer = &b":42\r\n"[..];
         let mut integer_cursor = Cursor::new(valid_integer);
-        let integer_result = Frame::parse(&mut integer_cursor);
-        assert_eq!(integer_result.unwrap(), Frame::Integer(42i64));
+        let integer_frame = Frame::parse(&mut integer_cursor);
+        assert_eq!(integer_frame.unwrap(), Frame::Integer(42i64));
         assert_eq!(integer_cursor.position(), 5);
 
         // Test 4: Valid bulk string
         let valid_bulk = &b"$6\r\nfoobar\r\n"[..];
         let mut bulk_cursor = Cursor::new(valid_bulk);
-        let bulk_result = Frame::parse(&mut bulk_cursor);
-        assert_eq!(
-            bulk_result.unwrap(),
-            Frame::Bulk("foobar".as_bytes().into())
-        );
+        let bulk_frame = Frame::parse(&mut bulk_cursor);
+        assert_eq!(bulk_frame.unwrap(), Frame::Bulk("foobar".as_bytes().into()));
         assert_eq!(bulk_cursor.position(), 12);
 
         // Test 5: Valid empty bulk string
         let valid_emptybulk = &b"$0\r\n\r\n"[..];
         let mut emptybulk_cursor = Cursor::new(valid_emptybulk);
-        let emptybulk_result = Frame::parse(&mut emptybulk_cursor);
-        assert_eq!(emptybulk_result.unwrap(), Frame::Bulk("".as_bytes().into()));
+        let emptybulk_frame = Frame::parse(&mut emptybulk_cursor);
+        assert_eq!(emptybulk_frame.unwrap(), Frame::Bulk("".as_bytes().into()));
         assert_eq!(emptybulk_cursor.position(), 6);
 
         // Test 6: Valid null bulk string
         let valid_nullbulk = &b"$-1\r\n"[..];
         let mut nullbulk_cursor = Cursor::new(valid_nullbulk);
-        let nullbulk_result = Frame::parse(&mut nullbulk_cursor);
-        assert_eq!(nullbulk_result.unwrap(), Frame::Null);
+        let nullbulk_frame = Frame::parse(&mut nullbulk_cursor);
+        assert_eq!(nullbulk_frame.unwrap(), Frame::Null);
         assert_eq!(nullbulk_cursor.position(), 5);
 
         // Test 7: Valid array
         let valid_array = &b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut array_cursor = Cursor::new(valid_array);
-        let array_result = Frame::parse(&mut array_cursor);
+        let array_frame = Frame::parse(&mut array_cursor);
         assert_eq!(
-            array_result.unwrap(),
+            array_frame.unwrap(),
             Frame::Array(vec![
                 Frame::Bulk("foo".as_bytes().into()),
                 Frame::Bulk("bar".as_bytes().into())
@@ -587,9 +584,9 @@ mod tests {
         // Test 8: Valid nested array
         let valid_nestarray = &b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n"[..];
         let mut nestarray_cursor = Cursor::new(valid_nestarray);
-        let nestarray_result = Frame::parse(&mut nestarray_cursor);
+        let nestarray_frame = Frame::parse(&mut nestarray_cursor);
         assert_eq!(
-            nestarray_result.unwrap(),
+            nestarray_frame.unwrap(),
             Frame::Array(vec![
                 Frame::Array(vec![
                     Frame::Integer(1i64),
@@ -607,22 +604,22 @@ mod tests {
         // Test 9: Valid empty array
         let valid_emptyarray = &b"*0\r\n"[..];
         let mut emptyarray_cursor = Cursor::new(valid_emptyarray);
-        let emptyarray_result = Frame::parse(&mut emptyarray_cursor);
-        assert_eq!(emptyarray_result.unwrap(), Frame::Array(vec![]));
+        let emptyarray_frame = Frame::parse(&mut emptyarray_cursor);
+        assert_eq!(emptyarray_frame.unwrap(), Frame::Array(vec![]));
         assert_eq!(emptyarray_cursor.position(), 4);
 
         // Test 10: Valid null array
         let valid_nullarray = &b"*-1\r\n"[..];
         let mut nullarray_cursor = Cursor::new(valid_nullarray);
-        let nullarray_result = Frame::parse(&mut nullarray_cursor);
-        assert_eq!(nullarray_result.unwrap(), Frame::Null);
+        let nullarray_frame = Frame::parse(&mut nullarray_cursor);
+        assert_eq!(nullarray_frame.unwrap(), Frame::Null);
         assert_eq!(nullarray_cursor.position(), 5);
 
         // Test 11: Invalid first byte
         let wrong_1stbyte = &b"&hello world\r\n"[..];
         let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
-        let wrong_1stbyte_result = Frame::parse(&mut wrong_1stbyte_cursor);
-        assert!(matches!(wrong_1stbyte_result, Err(Error::Other(_))));
+        let wrong_1stbyte_frame = Frame::parse(&mut wrong_1stbyte_cursor);
+        assert!(matches!(wrong_1stbyte_frame, Err(Error::Other(_))));
         // get_u8() advances cursor by 1
         assert_eq!(wrong_1stbyte_cursor.position(), 1);
     }

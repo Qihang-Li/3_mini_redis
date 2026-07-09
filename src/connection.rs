@@ -214,9 +214,12 @@ mod tests {
         // Step 1: write data to the client
         client.write_all(b"+Hello, World!\r\n").await?;
         // Step 2: read data from the connection
-        let frame = connection.read_frame().await?;
+        let valid_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
-        assert_eq!(frame, Some(Frame::Simple("Hello, World!".to_string())));
+        assert_eq!(
+            valid_frame,
+            Some(Frame::Simple("Hello, World!".to_string()))
+        );
 
         // Test 2: Valid full array, sent in parts
         // Step 1: write data to the client
@@ -236,10 +239,10 @@ mod tests {
         });
         */
         // Step 2: read data from the connection
-        let frame = connection.read_frame().await?;
+        let fragmented_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
         assert_eq!(
-            frame,
+            fragmented_frame,
             Some(Frame::Array(vec![
                 Frame::Bulk("foo".as_bytes().into()),
                 Frame::Bulk("bar".as_bytes().into())
@@ -250,9 +253,9 @@ mod tests {
         // Step 1: close the connection
         drop(client);
         // Step 2: read data from the connection
-        let frame = connection.read_frame().await?;
+        let dropped_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
-        assert_eq!(frame, None);
+        assert_eq!(dropped_frame, None);
 
         Ok(())
     }

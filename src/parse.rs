@@ -23,11 +23,11 @@ pub struct Parse {
 }
 
 impl Parse {
-    /// Create a new Parse object
+    /// Create a new Parse object using a `Frame`
     ///
     /// # Errors
     /// Returns `Error::Other` if the frame is not an `Frame::Array`.
-    pub fn new(frame: Frame) -> Result<Parse, Error> {
+    pub fn from_frame(frame: Frame) -> Result<Parse, Error> {
         match frame {
             Frame::Array(vec) => Ok(Self {
                 parts: vec.into_iter(),
@@ -42,7 +42,7 @@ impl Parse {
     ///
     /// # Errors
     /// Returns `Error::EndOfStream` if there is no next frame
-    /// Returns `Error::Other` if the frame is not a simple or bulk string
+    /// Returns `Error::Other` if the frame is not a simple or bulk string.
     pub fn next_bytes(&mut self) -> Result<Bytes, Error> {
         let Some(frame) = self.parts.next() else {
             return Err(Error::EndOfStream);
@@ -59,12 +59,33 @@ impl Parse {
     /// Extract the next byte and convert to string if available.
     ///
     /// # Errors
-    /// Returns `Error::Other` if the contents are not UTF-8 compatible
+    /// Returns `Error::Other` if the contents are not UTF-8 compatible.
     pub fn next_string(&mut self) -> Result<String, Error> {
         let bytes = self.next_bytes()?;
         let result = String::from_utf8(bytes.to_vec())
             .map_err(|_| Error::Other("Wrong message: Invalid command, UTF-8 incompatible"))?;
         Ok(result)
+    }
+
+    /// Determine if the iterator is exhausted.
+    ///
+    /// # Errors
+    /// Returns `Error::Other` if any element remains in the iterator.
+    pub fn finish(&mut self) -> Result<(), Error> {
+        if self.parts.next().is_some() {
+            return Err(Error::Other("Wrong message: Redundant arguments"));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+impl Parse {
+    /// constructor for test only
+    pub(crate) fn new_test(frames: Vec<Frame>) -> Self {
+        Self {
+            parts: frames.into_iter(),
+        }
     }
 }
 
@@ -74,17 +95,17 @@ mod tests {
 
     #[test]
     fn test_parse_new() {
-        // Test 1: valid command
+        // Test 1: Valid command
         let valid_frame = Frame::Array(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Bulk(Bytes::from("42")),
         ]);
-        let valid_command = Parse::new(valid_frame);
+        let valid_command = Parse::from_frame(valid_frame);
         assert!(valid_command.is_ok());
 
-        // Test 2: invalid command, not as an array
+        // Test 2: Invalid command, not as an array
         let invalid_frame = Frame::Null;
-        let invalid_command = Parse::new(invalid_frame);
+        let invalid_command = Parse::from_frame(invalid_frame);
         assert!(matches!(invalid_command, Err(Error::Other(_))));
     }
 
@@ -98,21 +119,21 @@ mod tests {
                 Frame::Error(String::from("HTTP 504")),
             ]),
         ]);
-        let mut command = Parse::new(frame).unwrap();
+        let mut command = Parse::from_frame(frame).unwrap();
 
-        // Test 1: valid byte, as a bulk string
+        // Test 1: Valid byte, as a bulk string
         let valid_bulk_byte = command.next_bytes();
         assert_eq!(valid_bulk_byte, Ok(Bytes::from("Hello, ")));
 
-        // Test 2: valid byte, as a simple string
+        // Test 2: Valid byte, as a simple string
         let valid_simple_byte = command.next_bytes();
         assert_eq!(valid_simple_byte, Ok(Bytes::from("World!")));
 
-        // Test 3: invalid byte, not as a string
+        // Test 3: Invalid byte, not as a string
         let invalid_byte = command.next_bytes();
         assert!(matches!(invalid_byte, Err(Error::Other(_))));
 
-        // Test 4: empty
+        // Test 4: Empty
         let empty_byte = command.next_bytes();
         assert_eq!(empty_byte, Err(Error::EndOfStream));
     }
@@ -124,23 +145,37 @@ mod tests {
             Frame::Simple(String::from("Tokio!")),
             Frame::Bulk(Bytes::from_static(b"\xF5\xFF")),
         ]);
-        let mut command = Parse::new(frame).unwrap();
+        let mut command = Parse::from_frame(frame).unwrap();
 
-        // Test 1: valid string, as a bulk string
+        // Test 1: Valid string, as a bulk string
         let valid_bulk_string = command.next_string();
         assert_eq!(valid_bulk_string, Ok(String::from("Hello, ")));
 
-        // Test 2: valid string, as a simple string
+        // Test 2: Valid string, as a simple string
         let valid_simple_string = command.next_string();
         assert_eq!(valid_simple_string, Ok(String::from("Tokio!")));
 
-        // Test 3: invalid string, not UFT-8 compatible
+        // Test 3: Invalid string, not UFT-8 compatible
         let invalid_string = command.next_string();
         assert!(matches!(invalid_string, Err(Error::Other(_))));
 
-        // No test 4: no need to check invalid byte and empty vector,
+        // No test 4: No invalid byte or empty vector,
         // since they are verified by test_parse_next_bytes()
         let empty_string = command.next_string();
         assert_eq!(empty_string, Err(Error::EndOfStream));
+    }
+
+    #[test]
+    fn test_parse_finish() {
+        let mut parse = Parse::from_frame(Frame::Array(vec![Frame::Null])).unwrap();
+
+        // Test 1: Uncleared iterator
+        let error_result = parse.finish();
+        assert!(matches!(error_result, Err(Error::Other(_))));
+
+        // Test 2: Exhausted iterator
+        let _ = parse.parts.next();
+        let result = parse.finish();
+        assert!(result.is_ok());
     }
 }
