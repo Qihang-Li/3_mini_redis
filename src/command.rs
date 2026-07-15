@@ -45,7 +45,7 @@ pub enum Command {
 }
 
 impl Command {
-    /// Create a command object of either `Get` or `Set` using a `Frame`
+    /// Creates a command object of either `Get` or `Set` using a `Frame`
     ///
     /// # Errors
     /// Returns `Error::Other` if the command is something else.

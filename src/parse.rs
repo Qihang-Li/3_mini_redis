@@ -23,7 +23,7 @@ pub struct Parse {
 }
 
 impl Parse {
-    /// Create a new Parse object using a `Frame`
+    /// Creates a new Parse object using a `Frame`
     ///
     /// # Errors
     /// Returns `Error::Other` if the frame is not an `Frame::Array`.
@@ -38,7 +38,7 @@ impl Parse {
         }
     }
 
-    /// Extract the next byte if available.
+    /// Extracts the next byte if available.
     ///
     /// # Errors
     /// Returns `Error::EndOfStream` if there is no next frame
@@ -56,7 +56,7 @@ impl Parse {
         }
     }
 
-    /// Extract the next byte and convert to string if available.
+    /// Extracts the next byte and convert to string if available.
     ///
     /// # Errors
     /// Returns `Error::Other` if the contents are not UTF-8 compatible.
@@ -67,7 +67,7 @@ impl Parse {
         Ok(result)
     }
 
-    /// Determine if the iterator is exhausted.
+    /// Determines if the iterator is exhausted.
     ///
     /// # Errors
     /// Returns `Error::Other` if any element remains in the iterator.

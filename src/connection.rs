@@ -90,7 +90,7 @@ impl Connection {
         }
     }
 
-    /// Write a standardized frame to a given connection.
+    /// Writes a standardized frame to a given connection.
     ///
     /// # Errors
     /// Returns an error if the network drops the connection abruptly while data
