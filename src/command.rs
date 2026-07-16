@@ -1,3 +1,4 @@
+use super::database::Database;
 use super::frame::Frame;
 use super::parse::{Error, Parse};
 use bytes::Bytes;
@@ -63,6 +64,23 @@ impl Command {
             _ => Err(Error::Other(
                 "Wrong message: Unsupported command, GET or SET expected",
             )),
+        }
+    }
+
+    pub fn apply(self, db: &Database) -> Frame {
+        // Step 1: match the command
+        match self {
+            // Step 2: execute the command
+            Command::Get(command) => match db.get(command.key.as_str()) {
+                Some(bytes) => Frame::Bulk(bytes),
+                None => Frame::Null,
+            },
+
+            // Step 2': execute the command
+            Command::Set(command) => {
+                db.set(command.key, command.value);
+                Frame::Simple(String::from("OK"))
+            }
         }
     }
 }
@@ -166,5 +184,32 @@ mod tests {
 
         let invalid_command = Command::from_frame(invalid_frame);
         assert!(matches!(invalid_command, Err(Error::Other(_))));
+    }
+
+    #[test]
+    fn test_command_apply() {
+        let test_db = Database::new();
+
+        // Test 1: insert an entry
+        let set_command = Command::Set(Set {
+            key: String::from("Answer"),
+            value: Bytes::from("42"),
+        });
+        let set_resp_frame = set_command.apply(&test_db);
+        assert_eq!(set_resp_frame, Frame::Simple(String::from("OK")));
+
+        // Test 2: get value of existing entry
+        let get_valid_command = Command::Get(Get {
+            key: String::from("Answer"),
+        });
+        let get_valid_resp_frame = get_valid_command.apply(&test_db);
+        assert_eq!(get_valid_resp_frame, Frame::Bulk(Bytes::from("42")));
+
+        // Test 3: get value of non-existing entry
+        let get_invalid_command = Command::Get(Get {
+            key: String::from("Alpha"),
+        });
+        let get_invalid_resp_frame = get_invalid_command.apply(&test_db);
+        assert_eq!(get_invalid_resp_frame, Frame::Null);
     }
 }
