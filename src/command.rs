@@ -1,6 +1,6 @@
-use super::database::Database;
-use super::frame::Frame;
-use super::parse::{Error, Parse};
+use crate::database::Database;
+use crate::frame::Frame;
+use crate::parse::{Error, Parse};
 use bytes::Bytes;
 
 #[derive(Debug, PartialEq)]

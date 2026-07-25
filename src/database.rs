@@ -2,7 +2,7 @@ use bytes::Bytes;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct Database {
     rows: Arc<Mutex<HashMap<String, Bytes>>>,
 }

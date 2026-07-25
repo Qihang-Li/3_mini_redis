@@ -1,4 +1,4 @@
-use super::frame::Frame;
+use crate::frame::Frame;
 use bytes::Bytes;
 
 #[derive(Debug, PartialEq)]
