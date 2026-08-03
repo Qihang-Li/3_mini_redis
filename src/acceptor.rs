@@ -1,7 +1,7 @@
 use crate::database::Database;
+use crate::handler::Handler;
 use std::error::Error;
 use std::sync::Arc;
-use std::unimplemented;
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio::time::{Duration, sleep};
@@ -26,7 +26,7 @@ impl Acceptor {
         Self {
             listener,
             database,
-            broadcast_tx,
+            broadcast_tx, // why don't we use broadcast_rx: broadcast_tx.subscribe()?
             mpsc_tx,
             semaphore: Arc::new(Semaphore::new(max_connections)),
         }
@@ -37,43 +37,50 @@ impl Acceptor {
     /// # Errors
     /// Returns an error if network stack of OS crashes,
     /// or if a fatal OS resource limit is breached.
-    pub async fn run(&mut self) -> Result<(), Box<dyn Error>> {
+    pub async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 1: set up the broadcast receiver for Listener
-        let mut broadcast_rx_listener = self.broadcast_tx.subscribe();
+        let mut broadcast_rx_acceptor = self.broadcast_tx.subscribe();
 
         // Step 2: start an infinite loop and prepare semaphore inside
         loop {
-            let semaphore_clone = self.semaphore.clone();
-            let permit = semaphore_clone.acquire_owned().await?;
+            let permit = self.semaphore.clone().acquire_owned().await?;
 
             // Step 3: use `tokio::select!` for the race
             tokio::select! {
+                // 3.(i) the business logic comes first
                 result = self.listener.accept() => {
 
                     // Step 4: match the `result`
                     match result {
-
-                        // 4.1 The main business logic
+                        // 4.(i) The main business logic
                         Ok((socket, _)) => {
 
                             // Step 5: prepare tools for the spawned task
-                            let db_cloned = self.database.clone();
+                            let db_clone = self.database.clone();
                             let broadcast_rx_handler = self.broadcast_tx.subscribe();
-                            let mpsc_tx_cloned = self.mpsc_tx.clone();
+                            let mpsc_tx_clone = self.mpsc_tx.clone();
+                            let _handle = tokio::spawn(async move {
 
-                            let handle = tokio::spawn(async move {
-
-                                // Step 6: to be continued
-                                unimplemented!();
+                                // Step 6: execute the business logic by`handler`
+                                let handler = Handler::new(
+                                    socket,
+                                    db_clone,
+                                    broadcast_rx_handler,
+                                    mpsc_tx_clone,
+                                    permit,
+                                );
+                                // await the future and evaluate the Result
+                                if let Err(error) = handler.run().await {
+                                    tracing::error!(%error, "Handler failed to execute");
+                                }
                             });
                         },
-
-                        // 4.2 wait if listener.accept() gets an io_error
+                        // 4.(ii) wait if listener.accept() gets an io_error
                         Err(error) => {
                             match error.kind() {
-                                // Silently ignore transient client disconnections
+                                // ignore transient client disconnections silently
                                 std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset => {},
-                                // Log and sleep on all other errors (like OS resource exhaustion)
+                                // log and sleep on all other errors (like OS resource exhaustion)
                                 _ => {
                                     tracing::error!(%error, "failed to accept connection");
                                     sleep(Duration::from_millis(50)).await;
@@ -82,10 +89,11 @@ impl Acceptor {
                         }
                     }
                 },
-
-                // quit the loop once the shutdown signal is received
-                _ = broadcast_rx_listener.recv() => {
-                    return Ok(())
+                // 3.(ii) the server shutdown signal comes first
+                _ = broadcast_rx_acceptor.recv() => {
+                    // quit the loop once the shutdown signal is received
+                    tracing::info!("Shutdown signal received from OS");
+                    return Ok(());
                 }
             };
         }

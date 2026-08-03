@@ -30,7 +30,7 @@ impl Connection {
     /// # Errors
     /// Returns an error if the network drops the connection abruptly while data
     /// is in the buffer, or if the underlying TCP stream encounters an I/O failure.
-    pub async fn read_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error>> {
+    pub async fn read_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error + Send + Sync>> {
         // Input: a reference to Connection, allowing us to modify its buffer.
         // Output: either Ok(Some(Frame)), Ok(None), or Error of a certain kind.
 
@@ -44,11 +44,11 @@ impl Connection {
             // Step 2: we are here means the buffer does not contain a full frame.
             // try to read from network and re-run Step 1
             if self.stream.read_buf(&mut self.buffer).await? == 0 {
+                // 2.(i) a successful disconnect from the client. Quit the loop.
                 if self.buffer.is_empty() {
-                    // This is a successful disconnect. Quit the loop.
                     return Ok(None);
                 }
-                // Otherwise, it is an unsuccessful disconnect. Quit the loop.
+                // 2.(ii) an unsuccessful disconnect. Quit the loop.
                 return Err("Network Error! Failed to fetch network data.".into());
             }
             // Otherwise, it is an ongoing connection. Re-run the loop.
@@ -60,7 +60,7 @@ impl Connection {
     /// # Errors
     /// Returns an incomplete error if the while data in the buffer cannot parse
     /// a full frame, or any other failure.
-    fn parse_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error>> {
+    fn parse_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error + Send + Sync>> {
         // Input: a reference to Connection, allowing us to modify its buffer.
         // Output: either Ok(Some(Frame)), Ok(None), or Error of a certain kind.
 
@@ -69,20 +69,23 @@ impl Connection {
 
         // Step 2: apply Frame::check() to the cursor
         match Frame::check(&mut cursor) {
+            // 2.(i) a valid `Frame`
             Ok(()) => {
                 // Step 3: apply Frame::parse() to the cursor
-                // Step 3.1 reset cursor's position to its head
+                // 3.1 reset cursor's position to its head
                 cursor.set_position(0);
-                // Step 3.2 parse the frame using the cursor
+                // 3.2 parse the frame using the cursor
                 let frame = Frame::parse(&mut cursor)?;
-                // Step 3.3 get length of bytes read and update the buffer
+                // 3.3 get length of bytes read and update the buffer
                 // by removing exact as many bytes read
                 self.buffer
                     .advance(usize::try_from(cursor.position()).unwrap());
-                // Step 3.4 return the frame
+                // 3.4 return the frame
                 Ok(Some(frame))
             }
-            Err(super::frame::Error::Incomplete) => Ok(None),
+            // 2.(ii) an incomplete `Frame`
+            Err(crate::frame::Error::Incomplete) => Ok(None),
+            // 2.(iii) an invalid `Frame`
             Err(e) => Err(e.into()),
         }
     }
@@ -92,7 +95,7 @@ impl Connection {
     /// # Errors
     /// Returns an error if the network drops the connection abruptly while data
     /// is in the buffer, or if the underlying TCP stream encounters an I/O failure.
-    pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), Box<dyn Error>> {
+    pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 1: serialize the entire frame into the RAM buffer recursively
         self.write_data(frame).await?;
 
@@ -105,7 +108,7 @@ impl Connection {
         Ok(())
     }
 
-    async fn write_data(&mut self, frame: &Frame) -> Result<(), Box<dyn Error>> {
+    async fn write_data(&mut self, frame: &Frame) -> Result<(), Box<dyn Error + Send + Sync>> {
         match frame {
             Frame::Simple(string) => {
                 // 1. write the identifying byte
@@ -174,8 +177,8 @@ impl Connection {
 mod tests {
 
     use super::*;
-    //use std::error::Error;
     use tokio::net::TcpListener;
+    use tokio::time::{Duration, sleep};
 
     #[tokio::test]
     async fn test_connection_new() -> Result<(), Box<dyn Error>> {
@@ -194,7 +197,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_read_frame() -> Result<(), Box<dyn Error>> {
+    async fn test_connection_read_frame() -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 0: environment setup
         // create a TCP listener (a rounter or switch)
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -221,7 +224,7 @@ mod tests {
         // Test 2: Valid full array, sent in parts
         // Step 1: write data to the client
         client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        sleep(Duration::from_millis(10)).await;
         client.write_all(b"$3\r\nbar\r\n").await?;
         /*
         // We may have to write the concurrentcy mannually, in order to
@@ -231,7 +234,7 @@ mod tests {
         let mut background_client = client.try_clone().unwrap();
         tokio::spawn(async move {
             background_client.write_all(b"*2\r\n$3\r\nfoo\r\n").await.unwrap();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            sleep(Duration::from_millis(10)).await;
             background_client.write_all(b"$3\r\nbar\r\n").await.unwrap();
         });
         */
@@ -258,7 +261,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_write_frame() -> Result<(), Box<dyn Error>> {
+    async fn test_connection_write_frame() -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 0: environment setup
         // create a TCP listener (a rounter or switch)
         let listener = TcpListener::bind("127.0.0.1:0").await?;

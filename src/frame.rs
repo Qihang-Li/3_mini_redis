@@ -1,5 +1,4 @@
-use bytes::Buf;
-use bytes::Bytes;
+use bytes::{Buf, Bytes};
 use std::io::Cursor;
 
 #[derive(Debug)]
@@ -55,9 +54,9 @@ impl Frame {
 
             // Step 4: deal with bulk
             b'$' => {
-                // Step 4.1: get length of bulk string
+                // 4.1: get length of bulk string
                 let length = Frame::get_decimal(src)?;
-                // Step 4.2: match length of bulk string
+                // 4.2: match length of bulk string
                 match length {
                     -1 => {
                         // this is a null bulk string
@@ -66,9 +65,9 @@ impl Frame {
                     l if l >= 0 => {
                         let length_u = usize::try_from(length)
                             .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
-                        // Step 4.3 check remaining buffer length
+                        // 4.3 check remaining buffer length
                         if src.remaining() >= length_u {
-                            // Step 4.4: advance cursor and compare to \r\n
+                            // 4.4: advance cursor and compare to \r\n
                             src.advance(length_u);
                             if src.get_u8() == 13 && src.get_u8() == 10 {
                                 // this is a valid bulk string
@@ -93,16 +92,16 @@ impl Frame {
 
             // Step 5: deal with array
             b'*' => {
-                // Step 5.1: get size of array
+                // 5.1: get size of array
                 let size = Frame::get_decimal(src)?;
-                // Step 5.2: match size of array
+                // 5.2: match size of array
                 match size {
                     -1 => {
                         // this is a null array
                         Ok(())
                     }
                     s if s >= 0 => {
-                        // Step 5.3 deal with recursion
+                        // 5.3 deal with recursion
                         for _ in 0..size {
                             Frame::check(src)?;
                             // if we have a interstitial fragmented array here,
@@ -158,13 +157,13 @@ impl Frame {
 
             // Step 4: deal with bulk
             b'$' => {
-                // Step 4.1: get length of bulk string
+                // 4.1: get length of bulk string
                 let length = Frame::get_decimal(src)?;
-                // Step 4.2: match length of bulk string
+                // 4.2: match length of bulk string
                 if length >= 0 {
                     let length_u = usize::try_from(length)
                         .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
-                    // Step 4.3 collect the output
+                    // 4.3 collect the output
                     let result = Bytes::copy_from_slice(&src.chunk()[..length_u]);
                     // move cursor forward by length + 2
                     src.advance(length_u + 2);
@@ -177,16 +176,16 @@ impl Frame {
 
             // Step 5: deal with array
             b'*' => {
-                // Step 5.1: get size of array
+                // 5.1: get size of array
                 let size = Frame::get_decimal(src)?;
-                // Step 5.2: match size of array
+                // 5.2: match size of array
                 if size >= 0 {
                     let size_u = usize::try_from(size)
                         .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
                     if size_u >= 1024 {
                         return Err(Error::Other("Wrong message: size out of memory"));
                     }
-                    // Step 5.3 deal with recursion
+                    // 5.3 deal with recursion
                     let mut result = Vec::with_capacity(size_u);
                     for _ in 0..size {
                         result.push(Frame::parse(src)?);
@@ -257,7 +256,9 @@ impl Frame {
         // Step 3: deal with possible "-" signs in the beginning
         let first_byte = line.get_u8();
         match first_byte {
+            // 45 is the ascii code of -1
             45 => is_pos = -1,
+            // 48~57 are the ascii code of 0~9
             48..=57 => result = i64::from(first_byte - 48),
             _ => {
                 return Err(Error::Other("Wrong message: Not a number"));

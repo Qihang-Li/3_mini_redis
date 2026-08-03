@@ -22,7 +22,6 @@ impl Database {
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Bytes> {
         // Here we use a slice for key to optimize performance
-
         let data = self.rows.lock().unwrap();
         data.get(key).cloned()
     }

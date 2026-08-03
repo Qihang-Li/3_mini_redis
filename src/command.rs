@@ -59,26 +59,31 @@ impl Command {
 
         // Step 3: match the type of command and return corresponding command
         match command.as_str() {
+            // 3.(i) a get command
             "GET" => Ok(Self::Get(Get::from_parse(&mut parse)?)),
+            // 3.(ii) a set command
             "SET" => Ok(Self::Set(Set::from_parse(&mut parse)?)),
+            // 3.(iii) something else, here being an invalid command
             _ => Err(Error::Other(
                 "Wrong message: Unsupported command, GET or SET expected",
             )),
         }
     }
 
-    pub fn apply(self, db: &Database) -> Frame {
+    pub fn apply(self, database: &Database) -> Frame {
         // Step 1: match the command
         match self {
-            // Step 2: execute the command
-            Command::Get(command) => match db.get(command.key.as_str()) {
+            // 1.(i): a get command
+            Command::Get(command) => match database.get(command.key.as_str()) {
+                // Step 2: execute the command
                 Some(bytes) => Frame::Bulk(bytes),
                 None => Frame::Null,
             },
 
-            // Step 2': execute the command
+            // 1.(ii): a set command
             Command::Set(command) => {
-                db.set(command.key, command.value);
+                // Step 2: execute the command
+                database.set(command.key, command.value);
                 Frame::Simple(String::from("OK"))
             }
         }
@@ -103,7 +108,6 @@ mod tests {
         );
 
         // Test 2: Superfluous command
-
         let mut superfluous_get_parse = Parse::new_test(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Error(String::from("me!")),
