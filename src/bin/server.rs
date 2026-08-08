@@ -1,6 +1,7 @@
 use mini_redis::acceptor::Acceptor;
 use mini_redis::database::Database;
 use std::error::Error;
+use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
@@ -40,7 +41,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Server listening on port 6379");
 
     // 1.4 prepare an instance of acceptor
-    let mut acceptor = Acceptor::new(listener, db, broadcast_tx.clone(), mpsc_tx.clone(), 512);
+    let mut acceptor = Acceptor::new(
+        listener,
+        db,
+        broadcast_tx.clone(),
+        mpsc_tx.clone(),
+        512,
+        Duration::from_secs(600),
+    );
 
     // Step 2: Uses `tokio::select!` to race the main thread and shutdown signal
     tokio::select! {

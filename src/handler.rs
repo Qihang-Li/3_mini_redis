@@ -14,6 +14,7 @@ pub struct Handler {
     broadcast_rx: broadcast::Receiver<()>,
     _mpsc_tx: mpsc::Sender<()>,
     _permit: OwnedSemaphorePermit,
+    timeout_duration: Duration,
 }
 
 impl Handler {
@@ -24,6 +25,7 @@ impl Handler {
         broadcast_rx: broadcast::Receiver<()>,
         _mpsc_tx: mpsc::Sender<()>,
         _permit: OwnedSemaphorePermit,
+        timeout_duration: Duration,
     ) -> Self {
         Self {
             connection: Connection::new(stream),
@@ -31,6 +33,7 @@ impl Handler {
             broadcast_rx,
             _mpsc_tx,
             _permit,
+            timeout_duration,
         }
     }
 
@@ -45,7 +48,7 @@ impl Handler {
             // Step 2: use `tokio::select!` for the race
             tokio::select! {
                 // 2.(i) the business logic comes first
-                timeout_result = timeout(Duration::from_mins(10), self.connection.read_frame()) => {
+                timeout_result = timeout(self.timeout_duration, self.connection.read_frame()) => {
 
                     // Step 3: match `timeout_result` to unwrap the timeout wrapper
                     let read_frame_result = match timeout_result {
@@ -53,7 +56,7 @@ impl Handler {
                         Ok(result) => result,
                         // 3.(ii) the timeout comes first
                         Err(_elapsed) => {
-                            tracing::info!("Timeout error! Server idle for 10 minutes");
+                            tracing::info!("Timeout error! Server idle for too long");
                             break;
                         },
                     };
@@ -68,7 +71,14 @@ impl Handler {
                             break;
                         },
                         // 4.(iii) the error when client disconnected
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            // construct the error payload
+                            let error_frame = Frame::Error(error.to_string());
+                            // attempt a best-effort transmission to the client
+                            let _ = self.connection.write_frame(&error_frame).await;
+                            // drop the connection to protect the server
+                            return Err(error);
+                        }
                     };
 
                     // Step 5: Try to get a `Command`

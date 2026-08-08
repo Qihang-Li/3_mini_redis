@@ -13,6 +13,7 @@ pub struct Acceptor {
     broadcast_tx: broadcast::Sender<()>,
     mpsc_tx: mpsc::Sender<()>,
     semaphore: Arc<Semaphore>,
+    timeout_duration: Duration,
 }
 
 impl Acceptor {
@@ -22,13 +23,15 @@ impl Acceptor {
         broadcast_tx: broadcast::Sender<()>,
         mpsc_tx: mpsc::Sender<()>,
         max_connections: usize,
+        timeout_duration: Duration,
     ) -> Self {
         Self {
             listener,
             database,
-            broadcast_tx, // why don't we use broadcast_rx: broadcast_tx.subscribe()?
+            broadcast_tx,
             mpsc_tx,
             semaphore: Arc::new(Semaphore::new(max_connections)),
+            timeout_duration,
         }
     }
 
@@ -59,15 +62,17 @@ impl Acceptor {
                             let db_clone = self.database.clone();
                             let broadcast_rx_handler = self.broadcast_tx.subscribe();
                             let mpsc_tx_clone = self.mpsc_tx.clone();
+                            let timeout_duration = self.timeout_duration;
                             let _handle = tokio::spawn(async move {
 
-                                // Step 6: execute the business logic by`handler`
+                                // Step 6: execute the business logic by `handler`
                                 let handler = Handler::new(
                                     socket,
                                     db_clone,
                                     broadcast_rx_handler,
                                     mpsc_tx_clone,
                                     permit,
+                                    timeout_duration,
                                 );
                                 // await the future and evaluate the Result
                                 if let Err(error) = handler.run().await {

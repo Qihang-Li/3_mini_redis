@@ -199,7 +199,7 @@ mod tests {
     #[tokio::test]
     async fn test_connection_read_frame() -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 0: environment setup
-        // create a TCP listener (a rounter or switch)
+        // create a TCP listener (a router or switch)
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         // get address of the listener
         let listener_addr = listener.local_addr().unwrap();
@@ -227,7 +227,7 @@ mod tests {
         sleep(Duration::from_millis(10)).await;
         client.write_all(b"$3\r\nbar\r\n").await?;
         /*
-        // We may have to write the concurrentcy mannually, in order to
+        // We may have to write the concurrency mannually, in order to
         // force the server to read the first part, hit the Incomplete error,
         // and wake up when Part B arrives.
 
