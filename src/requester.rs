@@ -22,7 +22,7 @@ impl Requester {
     pub async fn connect(
         ip_addr: SocketAddr,
         timeout_duration: Duration,
-    ) -> Result<Self, Box<dyn Error>> {
+    ) -> Result<Self, Box<dyn Error + Send + Sync>> {
         match timeout(timeout_duration, TcpStream::connect(ip_addr)).await {
             // (i) connection success
             Ok(Ok(socket)) => Ok(Self {
