@@ -2,7 +2,9 @@ use crate::command::Command;
 use crate::connection::Connection;
 use crate::database::Database;
 use crate::frame::Frame;
+use crate::metrics::Metrics;
 use std::error::Error;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc};
 use tokio::time::{Duration, timeout};
@@ -15,6 +17,7 @@ pub struct Handler {
     _mpsc_tx: mpsc::Sender<()>,
     _permit: OwnedSemaphorePermit,
     timeout_duration: Duration,
+    metrics: Arc<Metrics>,
 }
 
 impl Handler {
@@ -26,6 +29,7 @@ impl Handler {
         _mpsc_tx: mpsc::Sender<()>,
         _permit: OwnedSemaphorePermit,
         timeout_duration: Duration,
+        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             connection: Connection::new(stream),
@@ -34,6 +38,7 @@ impl Handler {
             _mpsc_tx,
             _permit,
             timeout_duration,
+            metrics,
         }
     }
 
@@ -43,6 +48,9 @@ impl Handler {
     /// Returns an error if a fatal network boundary is breached, during
     /// transmission, or if the connection times out.
     pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: increment `active_connections` by 1
+        self.metrics.inc_active_connections();
+
         // Step 1: start an infinite event loop for client commands continuously
         loop {
             // Step 2: use `tokio::select!` for the race
@@ -86,13 +94,34 @@ impl Handler {
                         // 5.(i) the happy path with a valid `Command`
 
                         // Step 6: Execute the `Command`
-                        Ok(command) => command.apply(&self.database),
+                        // 6.(i) a get command
+                        Ok(Command::Get(command)) => {
+                            let frame = Command::Get(command).apply(&self.database);
+                            match frame {
+                                // increment `cache_hits` by 1
+                                Frame::Bulk(_) => self.metrics.inc_cache_hits(),
+                                // increment `cache_misses` by 1
+                                Frame::Null => self.metrics.inc_cache_misses(),
+                                _ => {} // Ignore any other unexpected states
+                            }
+                            frame // Return the frame to the outer assignment
+                        },
+                        // 6.(ii) a set command
+                        Ok(Command::Set(command)) => Command::Set(command).apply(&self.database),
+
                         // 5.(ii) input_frame can't form a valid `Command`
-                        Err(_) => Frame::Error("Wrong message: not a valid command".to_string()),
+                        Err(_) => {
+                            // increment `parse_failures` by 1
+                            self.metrics.inc_parse_failures();
+                            Frame::Error("Wrong message: not a valid command".to_string())
+                        }
                     };
 
                     // Step 7: formating `output_frame` into a response
                     self.connection.write_frame(&output_frame).await?;
+
+                    // Step 8: increment `total_requests` by 1
+                    self.metrics.inc_total_requests();
                 },
                 // 2.(ii) server shutdown signal comes first
                 _ = self.broadcast_rx.recv() => {
@@ -102,7 +131,9 @@ impl Handler {
             };
         }
 
-        // Step 8: end of the event loop
+        // Step 9: decrement `active_connections` by 1
+        self.metrics.dec_active_connections();
+        // Step 10: end of the event loop
         Ok(())
     }
 }

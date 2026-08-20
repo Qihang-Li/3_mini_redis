@@ -1,6 +1,8 @@
 use mini_redis::acceptor::Acceptor;
 use mini_redis::database::Database;
+use mini_redis::metrics::Metrics;
 use std::error::Error;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
@@ -48,6 +50,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mpsc_tx.clone(),
         512,
         Duration::from_secs(600),
+        Arc::new(Metrics::new()),
     );
 
     // Step 2: Uses `tokio::select!` to race the main thread and shutdown signal
@@ -66,6 +69,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let _ = broadcast_tx.send(());
     // 3.2 suspend the main thread until the channel closes,
     // which only occurs when the internal Sender count reaches 0.
+    drop(acceptor);
     drop(mpsc_tx);
     mpsc_rx.recv().await;
     // 3.3 close the main thread.

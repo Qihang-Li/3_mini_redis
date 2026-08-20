@@ -1,8 +1,10 @@
 use bytes::BytesMut;
 use mini_redis::acceptor::Acceptor;
 use mini_redis::database::Database;
+use mini_redis::metrics::Metrics;
 use std::error::Error;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
@@ -35,6 +37,7 @@ async fn test_server(
         mpsc_tx.clone(),
         max_connections,
         timeout_duration,
+        Arc::new(Metrics::new()),
     );
 
     let _handle = tokio::spawn(async move {

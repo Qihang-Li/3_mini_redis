@@ -4,5 +4,6 @@ pub mod connection;
 pub mod database;
 pub mod frame;
 pub mod handler;
+pub mod metrics;
 pub mod parse;
 pub mod requester;

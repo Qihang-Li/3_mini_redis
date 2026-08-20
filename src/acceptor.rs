@@ -1,5 +1,6 @@
 use crate::database::Database;
 use crate::handler::Handler;
+use crate::metrics::Metrics;
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::TcpListener;
@@ -14,6 +15,7 @@ pub struct Acceptor {
     mpsc_tx: mpsc::Sender<()>,
     semaphore: Arc<Semaphore>,
     timeout_duration: Duration,
+    metrics: Arc<Metrics>,
 }
 
 impl Acceptor {
@@ -24,6 +26,7 @@ impl Acceptor {
         mpsc_tx: mpsc::Sender<()>,
         max_connections: usize,
         timeout_duration: Duration,
+        metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             listener,
@@ -32,6 +35,7 @@ impl Acceptor {
             mpsc_tx,
             semaphore: Arc::new(Semaphore::new(max_connections)),
             timeout_duration,
+            metrics,
         }
     }
 
@@ -63,6 +67,7 @@ impl Acceptor {
                             let broadcast_rx_handler = self.broadcast_tx.subscribe();
                             let mpsc_tx_clone = self.mpsc_tx.clone();
                             let timeout_duration = self.timeout_duration;
+                            let metrics = self.metrics.clone();
                             let _handle = tokio::spawn(async move {
 
                                 // Step 6: execute the business logic by `handler`
@@ -73,6 +78,7 @@ impl Acceptor {
                                     mpsc_tx_clone,
                                     permit,
                                     timeout_duration,
+                                    metrics,
                                 );
                                 // await the future and evaluate the Result
                                 if let Err(error) = handler.run().await {
@@ -82,6 +88,8 @@ impl Acceptor {
                         },
                         // 4.(ii) wait if listener.accept() gets an io_error
                         Err(error) => {
+                            // increment `rejected_connections` by 1
+                            self.metrics.inc_rejected_connections();
                             match error.kind() {
                                 // ignore transient client disconnections silently
                                 std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset => {},
@@ -98,9 +106,11 @@ impl Acceptor {
                 _ = broadcast_rx_acceptor.recv() => {
                     // quit the loop once the shutdown signal is received
                     tracing::info!("Shutdown signal received from OS");
-                    return Ok(());
+                    break;
                 }
             };
         }
+
+        Ok(())
     }
 }
