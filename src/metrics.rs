@@ -17,6 +17,7 @@ impl Default for Metrics {
 }
 
 impl Metrics {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             active_connections: AtomicUsize::new(0),
@@ -54,5 +55,13 @@ impl Metrics {
 
     pub fn inc_cache_misses(&self) {
         self.cache_misses.fetch_add(1, Relaxed);
+    }
+
+    pub fn total_requests(&self) -> usize {
+        self.total_requests.load(Relaxed)
+    }
+
+    pub fn active_connections(&self) -> usize {
+        self.active_connections.load(Relaxed)
     }
 }

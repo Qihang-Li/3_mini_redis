@@ -49,7 +49,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         broadcast_tx.clone(),
         mpsc_tx.clone(),
         512,
-        Duration::from_secs(600),
+        Duration::from_mins(10),
         Arc::new(Metrics::new()),
     );
 

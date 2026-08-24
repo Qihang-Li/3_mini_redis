@@ -107,7 +107,7 @@ mod tests {
         let mut test_client = TcpStream::connect(address).await?;
         // wait until the acceptor finishes its job of spawning and subcsribing;
         // otherwise, it can't receive the shutdown signal
-        sleep(Duration::from_millis(50)).await;
+        sleep(Duration::from_millis(100)).await;
         // broadcast a signal for graceful shutdown first
         let _ = broadcast_tx.send(());
         mpsc_rx.recv().await;
@@ -136,7 +136,7 @@ mod tests {
         // create a TCP client connecting to the server
         let mut test_client = TcpStream::connect(address).await?;
         // Sleep longer than the timeout duration
-        sleep(Duration::from_millis(20)).await;
+        sleep(Duration::from_millis(100)).await;
         // the client sends a Redis command "SET Alpha 137"
         test_client
             .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n")
@@ -235,7 +235,7 @@ mod tests {
             .await?;
         // now `test_client_3` is put in the wait list
         let blocked_read = tokio::time::timeout(
-            Duration::from_millis(50),
+            Duration::from_millis(100),
             test_client_3.read_buf(&mut buffer_3),
         )
         .await;
