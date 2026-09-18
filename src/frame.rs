@@ -63,12 +63,15 @@ impl Frame {
                         Ok(())
                     }
                     l if l >= 0 => {
-                        let length_u = usize::try_from(length)
+                        let length_usize = usize::try_from(length)
                             .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                        let length_required = length_usize
+                            .checked_add(2)
+                            .ok_or(Error::Other("Wrong message: Length overflow"))?;
                         // 4.3 check remaining buffer length
-                        if src.remaining() >= length_u {
+                        if src.remaining() >= length_required {
                             // 4.4: advance cursor and compare to \r\n
-                            src.advance(length_u);
+                            src.advance(length_usize);
                             if src.get_u8() == 13 && src.get_u8() == 10 {
                                 // this is a valid bulk string
                                 return Ok(());
@@ -129,6 +132,18 @@ impl Frame {
     /// # Errors
     /// Returns an error if the frame has invalid formatting.
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
+        let cursor_position = src.position();
+
+        match Self::check(src) {
+            Ok(()) => {
+                src.set_position(cursor_position);
+                Self::parse_data(src)
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn parse_data(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
         // Output: either Ok(Frame) for a full frame, or Error of a kind
 
@@ -188,7 +203,7 @@ impl Frame {
                     // 5.3 deal with recursion
                     let mut result = Vec::with_capacity(size_u);
                     for _ in 0..size {
-                        result.push(Frame::parse(src)?);
+                        result.push(Frame::parse_data(src)?);
                     }
                     return Ok(Frame::Array(result));
                 }
@@ -271,23 +286,30 @@ impl Frame {
 
         // Step 4: handle the remaining bytes
         while line.has_remaining() {
-            result *= 10;
+            result = result
+                .checked_mul(10)
+                .ok_or(Error::Other("Wrong message: Integer overflow"))?;
             let byte = line.get_u8();
             match byte {
                 48..=57 => {
-                    result += i64::from(byte - 48);
+                    //result += i64::from(byte - 48);
+                    result = result
+                        .checked_add(is_pos * i64::from(byte - 48))
+                        .ok_or(Error::Other("Wrong message: Integer overflow"))?;
                 }
                 _ => {
                     return Err(Error::Other("Wrong message: Not a number"));
                 }
             }
         }
-        Ok(is_pos * result)
+        Ok(result)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::assert_eq;
+
     use super::*;
 
     #[test]
@@ -394,6 +416,41 @@ mod tests {
         let wrong_int = Frame::get_decimal(&mut wrong_cursor);
         assert!(matches!(wrong_int, Err(Error::Other(_))));
         assert_eq!(wrong_cursor.position(), 8);
+
+        // Test 9: Integer being i64::MAX
+        let i64max = &b"9223372036854775807\r\n"[..];
+        let mut i64max_cursor = Cursor::new(i64max);
+        let i64max_int = Frame::get_decimal(&mut i64max_cursor);
+        assert_eq!(i64max_int.unwrap(), i64::MAX);
+        assert_eq!(i64max_cursor.position(), 21);
+
+        // Test 10: Integer being i64::MAX + 1
+        let i64max_p1 = &b"9223372036854775808\r\n"[..];
+        let mut i64max_p1_cursor = Cursor::new(i64max_p1);
+        let i64max_p1_int = Frame::get_decimal(&mut i64max_p1_cursor);
+        assert!(matches!(i64max_p1_int, Err(Error::Other(_))));
+        assert_eq!(i64max_p1_cursor.position(), 21);
+
+        // Test 11: Integer being i64::MIN
+        let i64min = &b"-9223372036854775808\r\n"[..];
+        let mut i64min_cursor = Cursor::new(i64min);
+        let i64min_int = Frame::get_decimal(&mut i64min_cursor);
+        assert_eq!(i64min_int.unwrap(), i64::MIN);
+        assert_eq!(i64min_cursor.position(), 22);
+
+        // Test 12: Integer being i64::MIN - 1
+        let i64min_p1 = &b"-9223372036854775809\r\n"[..];
+        let mut i64min_p1_cursor = Cursor::new(i64min_p1);
+        let i64min_p1_int = Frame::get_decimal(&mut i64min_p1_cursor);
+        assert!(matches!(i64min_p1_int, Err(Error::Other(_))));
+        assert_eq!(i64min_p1_cursor.position(), 22);
+
+        // Test 13: Integer being i64::MAX * 10
+        let i64max_x10 = &b"92233720368547758070\r\n"[..];
+        let mut i64max_x10_cursor = Cursor::new(i64max_x10);
+        let i64max_x10_int = Frame::get_decimal(&mut i64max_x10_cursor);
+        assert!(matches!(i64max_x10_int, Err(Error::Other(_))));
+        assert_eq!(i64max_x10_cursor.position(), 22);
     }
 
     #[test]
@@ -517,6 +574,26 @@ mod tests {
         let wrong_arraysize_result = Frame::check(&mut wrong_arraysize_cursor);
         assert!(matches!(wrong_arraysize_result, Err(Error::Other(_))));
         assert_eq!(wrong_arraysize_cursor.position(), 7);
+
+        // Test 18: Incomplete bulk terminator
+        let bulk_terminator = &b"$6\r\nfoobar\r"[..];
+        let mut bulk_terminator_cursor = Cursor::new(bulk_terminator);
+        let bulk_terminator_result = Frame::check(&mut bulk_terminator_cursor);
+        assert!(matches!(bulk_terminator_result, Err(Error::Incomplete)));
+        assert_eq!(bulk_terminator_cursor.position(), 4);
+
+        // Test 19: Bulk length at i64::MAX
+        let i64max_length = &b"$9223372036854775807\r\n"[..];
+        let mut i64max_length_cursor = Cursor::new(i64max_length);
+        let i64max_length_result = Frame::check(&mut i64max_length_cursor);
+        #[cfg(target_pointer_width = "64")]
+        assert!(matches!(i64max_length_result, Err(Error::Incomplete)));
+
+        #[cfg(target_pointer_width = "32")]
+        assert!(matches!(
+            i64max_length_result,
+            Err(Error::Other("Wrong message: Length overflow"))
+        ));
     }
 
     #[test]
@@ -623,5 +700,43 @@ mod tests {
         assert!(matches!(wrong_1stbyte_frame, Err(Error::Other(_))));
         // get_u8() advances cursor by 1
         assert_eq!(wrong_1stbyte_cursor.position(), 1);
+
+        // Test 12: Empty input
+        let empty_input = &b""[..];
+        let mut empty_input_cursor = Cursor::new(empty_input);
+        let empty_input_frame = Frame::parse(&mut empty_input_cursor);
+        assert!(matches!(empty_input_frame, Err(Error::Incomplete)));
+
+        // Test 13: Truncated bulk frame
+        let truncated_bulk = &b"$6\r\nfoo"[..];
+        let mut truncated_bulk_cursor = Cursor::new(truncated_bulk);
+        let truncated_bulk_frame = Frame::parse(&mut truncated_bulk_cursor);
+        assert!(matches!(truncated_bulk_frame, Err(Error::Incomplete)));
+
+        // Test 14: Invalid bulk frame with wrong ending
+        let wrong_end_bulk = &b"$6\r\nfoobar@@"[..];
+        let mut wrong_end_bulk_cursor = Cursor::new(wrong_end_bulk);
+        let wrong_end_bulk_frame = Frame::parse(&mut wrong_end_bulk_cursor);
+        assert!(matches!(wrong_end_bulk_frame, Err(Error::Other(_))));
+
+        // Test 15: Invalid integer frame
+        let non_num_int = &b":abc\r\n"[..];
+        let mut non_num_int_cursor = Cursor::new(non_num_int);
+        let non_num_int_frame = Frame::parse(&mut non_num_int_cursor);
+        assert!(matches!(non_num_int_frame, Err(Error::Other(_))));
+    }
+
+    #[test]
+    fn test_frame_parse_nonzero_cursor() {
+        // Test 16: Nonzero cursor position
+        let long_inputs = &b"$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n"[..];
+        let mut long_inputs_cursor = Cursor::new(long_inputs);
+        long_inputs_cursor.set_position(9);
+        let long_inputs_frame = Frame::parse(&mut long_inputs_cursor);
+        assert_eq!(
+            long_inputs_frame.unwrap(),
+            Frame::Bulk("Alpha".as_bytes().into())
+        );
+        assert_eq!(long_inputs_cursor.position(), 20);
     }
 }

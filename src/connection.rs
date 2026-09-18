@@ -67,20 +67,14 @@ impl Connection {
         // Step 1: create a cursor to access the buffer
         let mut cursor = Cursor::new(&self.buffer[..]);
 
-        // Step 2: apply Frame::check() to the cursor
-        match Frame::check(&mut cursor) {
+        // Step 2: apply Frame::parse() to the cursor
+        match Frame::parse(&mut cursor) {
             // 2.(i) a valid `Frame`
-            Ok(()) => {
-                // Step 3: apply Frame::parse() to the cursor
-                // 3.1 reset cursor's position to its head
-                cursor.set_position(0);
-                // 3.2 parse the frame using the cursor
-                let frame = Frame::parse(&mut cursor)?;
-                // 3.3 get length of bytes read and update the buffer
+            Ok(frame) => {
+                // get length of bytes read and update the buffer
                 // by removing exact as many bytes read
                 self.buffer
                     .advance(usize::try_from(cursor.position()).unwrap());
-                // 3.4 return the frame
                 Ok(Some(frame))
             }
             // 2.(ii) an incomplete `Frame`
