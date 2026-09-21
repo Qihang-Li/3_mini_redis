@@ -55,11 +55,14 @@ impl Connection {
         }
     }
 
-    /// Extracts a standardized frame from a given buffer.
+    /// Parses one frame from the beginning of the connection's read buffer.
+    ///
+    /// Returns `Ok(Some(frame))` and consumes that frame's bytes on success.
+    /// Returns `Ok(None)` without consuming buffered bytes if more input is needed.
     ///
     /// # Errors
-    /// Returns an incomplete error if the while data in the buffer cannot parse
-    /// a full frame, or any other failure.
+    /// Returns an error for invalid input or an exceeded implementation limit.
+    /// The buffer is left unchanged on error.
     fn parse_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error + Send + Sync>> {
         // Input: a reference to Connection, allowing us to modify its buffer.
         // Output: either Ok(Some(Frame)), Ok(None), or Error of a certain kind.

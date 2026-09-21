@@ -28,11 +28,22 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// Checks if a full frame is available.
+    /// Checks the structural completeness of one frame at the current cursor position.
+    ///
+    /// On success, advances the cursor past that frame. Content decoding may
+    /// still fail, for example if an integer frame contains nonnumeric text.
     ///
     /// # Errors
-    /// Returns `Error::Incomplete` if the byte stream is not a full frame.
+    /// Returns `Error::Incomplete` if more input is needed.
+    /// Returns `Error::Other` for invalid framing or invalid length fields.
+    /// The cursor position after an error is unspecified.
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), Error> {
+        let depth = 0;
+        Self::check_w_depth(src, depth)?;
+        Ok(())
+    }
+
+    fn check_w_depth(src: &mut Cursor<&[u8]>, depth: i32) -> Result<(), Error> {
         // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
         // Output: either Ok() showing a full frame, or Error of a kind
 
@@ -95,18 +106,21 @@ impl Frame {
 
             // Step 5: deal with array
             b'*' => {
+                if depth >= 32 {
+                    return Err(Error::Other("Wrong message: Too many nested levels"));
+                }
                 // 5.1: get size of array
                 let size = Frame::get_decimal(src)?;
                 // 5.2: match size of array
                 match size {
-                    -1 => {
-                        // this is a null array
+                    -1..=0 => {
+                        // this is a null or empty array
                         Ok(())
                     }
-                    s if s >= 0 => {
+                    1..1024 => {
                         // 5.3 deal with recursion
                         for _ in 0..size {
-                            Frame::check(src)?;
+                            Self::check_w_depth(src, depth + 1)?;
                             // if we have a interstitial fragmented array here,
                             // the "next inner frame" shall be [], and trigger
                             // Err(Incomplete) by the first line in check()
@@ -114,7 +128,7 @@ impl Frame {
                         Ok(())
                     }
                     _ => {
-                        // this is a array with negative length
+                        // this is a array of negative length or length >= 1024
                         Err(Error::Other("Wrong message: Invalid size for array"))
                     }
                 }
@@ -127,10 +141,15 @@ impl Frame {
         }
     }
 
-    /// Parses a frame from the cursor.
+    /// Parses one frame starting at the current cursor position.
+    ///
+    /// Performs its own structural check; callers do not need to call `check` first.
+    /// On success, advances the cursor past the frame, leaving subsequent bytes unread.
     ///
     /// # Errors
-    /// Returns an error if the frame has invalid formatting.
+    /// Returns `Error::Incomplete` if more input is needed.
+    /// Returns `Error::Other` for invalid input or an exceeded implementation limit.
+    /// The cursor position after an error is unspecified.
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         let cursor_position = src.position();
 
@@ -143,6 +162,15 @@ impl Frame {
         }
     }
 
+    /// Decodes one frame whose structure has already been checked.
+    ///
+    /// The cursor must be at the start of a frame covered by a successful
+    /// `check` call. Array children satisfy this requirement because their
+    /// enclosing array was checked recursively.
+    ///
+    /// # Errors
+    /// Returns an error if content decoding fails or an implementation limit
+    /// is exceeded.
     fn parse_data(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
         // Output: either Ok(Frame) for a full frame, or Error of a kind
@@ -175,18 +203,17 @@ impl Frame {
                 // 4.1: get length of bulk string
                 let length = Frame::get_decimal(src)?;
                 // 4.2: match length of bulk string
-                if length >= 0 {
-                    let length_u = usize::try_from(length)
-                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
-                    // 4.3 collect the output
-                    let result = Bytes::copy_from_slice(&src.chunk()[..length_u]);
-                    // move cursor forward by length + 2
-                    src.advance(length_u + 2);
-                    // this is an valid bulk string
-                    return Ok(Frame::Bulk(result));
+                if length == -1 {
+                    return Ok(Frame::Null);
                 }
-                // this is a null bulk string
-                Ok(Frame::Null)
+                let length_usize = usize::try_from(length)
+                    .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                // 4.3 collect the output
+                let result = Bytes::copy_from_slice(&src.chunk()[..length_usize]);
+                // move cursor forward by length + 2
+                src.advance(length_usize + 2);
+                // this is an valid bulk string
+                Ok(Frame::Bulk(result))
             }
 
             // Step 5: deal with array
@@ -194,21 +221,18 @@ impl Frame {
                 // 5.1: get size of array
                 let size = Frame::get_decimal(src)?;
                 // 5.2: match size of array
-                if size >= 0 {
-                    let size_u = usize::try_from(size)
-                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
-                    if size_u >= 1024 {
-                        return Err(Error::Other("Wrong message: size out of memory"));
-                    }
-                    // 5.3 deal with recursion
-                    let mut result = Vec::with_capacity(size_u);
-                    for _ in 0..size {
-                        result.push(Frame::parse_data(src)?);
-                    }
-                    return Ok(Frame::Array(result));
+                if size == -1 {
+                    return Ok(Frame::Null);
                 }
-                // this is a null array
-                Ok(Frame::Null)
+                // 5.3 deal with recursion
+                let mut result = Vec::with_capacity(
+                    usize::try_from(size)
+                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?,
+                );
+                for _ in 0..size {
+                    result.push(Frame::parse_data(src)?);
+                }
+                Ok(Frame::Array(result))
             }
 
             _ => {
@@ -597,6 +621,25 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_check_oversized_array() {
+        // Test 20: Oversized array header
+        let oversized_array = &b"*1024\r\n"[..];
+        let mut oversized_array_cursor = Cursor::new(oversized_array);
+        let oversized_array_result = Frame::check(&mut oversized_array_cursor);
+        assert!(matches!(oversized_array_result, Err(Error::Other(_))));
+    }
+
+    #[test]
+    fn test_frame_check_overnested_array() {
+        // Test 21: Array with too many nesting levels
+        let subframe = "*1\r\n".repeat(33);
+        let overnested_array = format!("{subframe}:0\r\n");
+        let mut overnested_array_cursor = Cursor::new(overnested_array.as_bytes());
+        let overnested_array_result = Frame::check(&mut overnested_array_cursor);
+        assert!(matches!(overnested_array_result, Err(Error::Other(_))));
+    }
+
+    #[test]
     fn test_frame_parse() {
         // Test 1: Valid simple string
         let valid_simple = &b"+Hello, World!\r\n"[..];
@@ -729,8 +772,8 @@ mod tests {
     #[test]
     fn test_frame_parse_nonzero_cursor() {
         // Test 16: Nonzero cursor position
-        let long_inputs = &b"$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n"[..];
-        let mut long_inputs_cursor = Cursor::new(long_inputs);
+        let long_inputs = "$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n";
+        let mut long_inputs_cursor = Cursor::new(long_inputs.as_bytes());
         long_inputs_cursor.set_position(9);
         let long_inputs_frame = Frame::parse(&mut long_inputs_cursor);
         assert_eq!(
@@ -738,5 +781,36 @@ mod tests {
             Frame::Bulk("Alpha".as_bytes().into())
         );
         assert_eq!(long_inputs_cursor.position(), 20);
+    }
+
+    #[test]
+    fn test_frame_parse_maxsized_array() {
+        // Test 17: Array at the maximum supported count
+        let subframe = ":0\r\n".repeat(1023);
+        let maxsized_array = format!("*1023\r\n{subframe}");
+        let mut maxsized_array_cursor = Cursor::new(maxsized_array.as_bytes());
+        let maxsized_array_result = Frame::parse(&mut maxsized_array_cursor);
+        assert_eq!(
+            maxsized_array_result.unwrap(),
+            // We do this in order not to derive the Clone trait to `Frame`
+            Frame::Array((0..1023).map(|_| Frame::Integer(0)).collect())
+        );
+        assert_eq!(maxsized_array_cursor.position(), 7 + 1023 * 4);
+    }
+
+    #[test]
+    fn test_frame_parse_maxnested_array() {
+        // Test 18: Array at the maximum supported nesting depth
+        let subframe = "*1\r\n".repeat(32);
+        let maxnested_array = format!("{subframe}:0\r\n");
+        let mut maxnested_array_cursor = Cursor::new(maxnested_array.as_bytes());
+        let maxnested_array_result = Frame::parse(&mut maxnested_array_cursor);
+        // The nested array to compare. We build it in-N-out
+        let mut expected = Frame::Integer(0);
+        for _ in 0..32 {
+            expected = Frame::Array(vec![expected]);
+        }
+        assert_eq!(maxnested_array_result.unwrap(), expected);
+        assert_eq!(maxnested_array_cursor.position(), 4 + 32 * 4);
     }
 }
