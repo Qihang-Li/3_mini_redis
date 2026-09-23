@@ -1,5 +1,5 @@
 use crate::frame::Frame;
-use bytes::{Buf, BytesMut};
+use bytes::{Buf, BufMut, BytesMut};
 use std::error::Error;
 use std::io::Cursor;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufWriter};
@@ -36,19 +36,31 @@ impl Connection {
 
         loop {
             // Step 1: try to read the current buffer and form a frame object.
-            if let Some(frame) = self.parse_frame()? {
+            let parse_result = self.parse_frame()?;
+            if let Some(frame) = parse_result {
                 // This indicates a successful read. Quit the loop.
                 return Ok(Some(frame));
             }
 
-            // Step 2: we are here means the buffer does not contain a full frame.
+            // Step 2: reaching this point means `parse_frame()` returned `Ok(None)`
+            // check if there is any remaining byte budget
+            if self.buffer.len() >= 65536 {
+                return Err("Frame cannot fit within the buffer limit.".into());
+            }
+
+            // Step 3: set a limit on how many more bytes the buffer can read from network
+            let bytes_left = 65536 - self.buffer.len();
+            let mut destination = (&mut self.buffer).limit(bytes_left);
+
+            // Step 4: reaching this point means the buffer does not contain a full frame.
             // try to read from network and re-run Step 1
-            if self.stream.read_buf(&mut self.buffer).await? == 0 {
-                // 2.(i) a successful disconnect from the client. Quit the loop.
+            let bytes_read = self.stream.read_buf(&mut destination).await?;
+            if bytes_read == 0 {
+                // 4.(i) a successful disconnect from the client. Quit the loop.
                 if self.buffer.is_empty() {
                     return Ok(None);
                 }
-                // 2.(ii) an unsuccessful disconnect. Quit the loop.
+                // 4.(ii) an unsuccessful disconnect. Quit the loop.
                 return Err("Network Error! Failed to fetch network data.".into());
             }
             // Otherwise, it is an ongoing connection. Re-run the loop.
@@ -174,6 +186,7 @@ impl Connection {
 mod tests {
 
     use super::*;
+    use bytes::Bytes;
     use tokio::net::TcpListener;
     use tokio::time::{Duration, sleep};
 
@@ -253,6 +266,107 @@ mod tests {
         let dropped_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
         assert_eq!(dropped_frame, None);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame_oversize() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create a connection from the server
+        let mut connection = Connection::new(server);
+
+        // Test 1: Valid RESP frame exceeding the buffer limit by one byte
+        // Step 1: write data to the client
+        let placeholder = "A".repeat(65527);
+        client
+            // that's exactly 65537 bytes
+            .write_all(format!("$65527\r\n{placeholder}\r\n").as_bytes())
+            .await?;
+        // Step 2: read data from the connection
+        let oversized_frame = connection.read_frame().await;
+        // Step 3: compare data to expectation
+        assert!(oversized_frame.is_err());
+        assert_eq!(
+            oversized_frame.unwrap_err().to_string(),
+            "Frame cannot fit within the buffer limit."
+        );
+        assert!(connection.buffer.len() <= 65536);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame_maxsize() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create a connection from the server
+        let mut connection = Connection::new(server);
+
+        // Test 2: Valid frame of exactly MAX_BUFFERED_BYTES bytes, followed by another frame
+        // Step 1: write data to the client
+        let placeholder = "A".repeat(65526);
+        client
+            // The bulk frame is exactly 65,536 bytes
+            .write_all(format!("$65526\r\n{placeholder}\r\n:0\r\n").as_bytes())
+            .await?;
+        // Step 2: read data from the connection
+        let maxsized_frame = connection.read_frame().await?;
+        // Step 3: compare data to expectation
+        //assert!(maxsized_frame.is_ok());
+        assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
+        assert!(connection.buffer.len() <= 65536);
+        let next_frame = connection.read_frame().await?;
+        assert_eq!(next_frame, Some(Frame::Integer(0)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame_maxsize_reversed()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create a connection from the server
+        let mut connection = Connection::new(server);
+
+        // Test 3: Valid frame, followed by a frame of exactly MAX_BUFFERED_BYTES bytes
+        // Step 1: write data to the client
+        let placeholder = "A".repeat(65526);
+        client
+            // The bulk frame is exactly 65,536 bytes
+            .write_all(format!(":0\r\n$65526\r\n{placeholder}\r\n").as_bytes())
+            .await?;
+        // Step 2: read data from the connection
+        let front_frame = connection.read_frame().await?;
+        assert_eq!(front_frame, Some(Frame::Integer(0)));
+        let maxsized_frame = connection.read_frame().await?;
+        // Step 3: compare data to expectation
+        //assert!(maxsized_frame.is_ok());
+        assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
+        assert!(connection.buffer.len() <= 65536);
 
         Ok(())
     }
