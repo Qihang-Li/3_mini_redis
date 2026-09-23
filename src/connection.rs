@@ -185,10 +185,12 @@ impl Connection {
 #[cfg(test)]
 mod tests {
 
+    use std::assert_eq;
+
     use super::*;
     use bytes::Bytes;
     use tokio::net::TcpListener;
-    use tokio::time::{Duration, sleep};
+    use tokio::time::{Duration, timeout};
 
     #[tokio::test]
     async fn test_connection_new() -> Result<(), Box<dyn Error>> {
@@ -232,27 +234,19 @@ mod tests {
         );
 
         // Test 2: Valid full array, sent in parts
-        // Step 1: write data to the client
+        // Step 1: send the first part only
         client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
-        sleep(Duration::from_millis(10)).await;
-        client.write_all(b"$3\r\nbar\r\n").await?;
-        /*
-        // We may have to write the concurrency mannually, in order to
-        // force the server to read the first part, hit the Incomplete error,
-        // and wake up when Part B arrives.
+        let partial_result = timeout(Duration::from_secs(1), connection.read_frame()).await;
+        // here `partial_result` should be `Err(Elapsed)`, indicating `read_frame()` is pending
+        assert!(partial_result.is_err());
+        assert_eq!(&connection.buffer[..], b"*2\r\n$3\r\nfoo\r\n");
 
-        let mut background_client = client.try_clone().unwrap();
-        tokio::spawn(async move {
-            background_client.write_all(b"*2\r\n$3\r\nfoo\r\n").await.unwrap();
-            sleep(Duration::from_millis(10)).await;
-            background_client.write_all(b"$3\r\nbar\r\n").await.unwrap();
-        });
-        */
-        // Step 2: read data from the connection
-        let fragmented_frame = connection.read_frame().await?;
+        // Step 2: now send the second part
+        client.write_all(b"$3\r\nbar\r\n").await?;
+        let final_result = timeout(Duration::from_secs(2), connection.read_frame()).await??;
         // Step 3: compare data to expectation
         assert_eq!(
-            fragmented_frame,
+            final_result,
             Some(Frame::Array(vec![
                 Frame::Bulk("foo".as_bytes().into()),
                 Frame::Bulk("bar".as_bytes().into())
@@ -290,6 +284,40 @@ mod tests {
         client
             // that's exactly 65537 bytes
             .write_all(format!("$65527\r\n{placeholder}\r\n").as_bytes())
+            .await?;
+        // Step 2: read data from the connection
+        let oversized_frame = connection.read_frame().await;
+        // Step 3: compare data to expectation
+        assert!(oversized_frame.is_err());
+        assert_eq!(
+            oversized_frame.unwrap_err().to_string(),
+            "Frame cannot fit within the buffer limit."
+        );
+        assert!(connection.buffer.len() <= 65536);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame_incomplete() -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create a connection from the server
+        let mut connection = Connection::new(server);
+
+        // Test 1: Valid RESP frame exceeding the buffer limit by one byte
+        // Step 1: write data to the client
+        let placeholder = "A".repeat(65536);
+        client
+            // that's exactly 65537 bytes
+            .write_all(format!("+{placeholder}").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let oversized_frame = connection.read_frame().await;
