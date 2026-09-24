@@ -2,6 +2,8 @@ use bytes::BytesMut;
 use mini_redis::acceptor::Acceptor;
 use mini_redis::database::Database;
 use mini_redis::metrics::Metrics;
+
+use mini_redis::config;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -20,7 +22,8 @@ async fn test_server(
 
     // allocate the global synchronization channels.
     // The broadcast channel requires a capacity limit.
-    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<()>(512);
+    let (broadcast_tx, _broadcast_rx) =
+        broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
     // The mpsc channel acts as the shutdown latch (capacity 1 is sufficient)
     let (mpsc_tx, mpsc_rx) = mpsc::channel::<()>(1);
 
@@ -59,7 +62,7 @@ mod tests {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(4096);
+        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Valid set request
         // clear the buffer
@@ -98,7 +101,7 @@ mod tests {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(4096);
+        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Shutdown signal comes first
         // clear the buffer
@@ -128,7 +131,7 @@ mod tests {
         let (address, broadcast_tx, mut mpsc_rx) =
             test_server(16, Duration::from_millis(10)).await?;
         // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(4096);
+        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Sleep until timeout
         // clear the buffer
@@ -159,7 +162,7 @@ mod tests {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(4096);
+        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Invalid Redis frame
         // create a TCP client connecting to the server
@@ -200,7 +203,7 @@ mod tests {
 
         // The first client
         // create a buffer for the client to receive data
-        let mut buffer_1 = BytesMut::with_capacity(4096);
+        let mut buffer_1 = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
         // create a TCP client connecting to the server
         let mut test_client_1 = TcpStream::connect(address).await?;
         // the client sends a Redis command "SET One 1"
@@ -226,7 +229,7 @@ mod tests {
 
         // The third client
         // create a buffer for the client to receive data
-        let mut buffer_3 = BytesMut::with_capacity(4096);
+        let mut buffer_3 = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
         // create a TCP client connecting to the server, which is still allowed
         let mut test_client_3 = TcpStream::connect(address).await?;
         // the client sends a Redis command "SET Three 3"

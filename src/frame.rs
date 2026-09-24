@@ -1,3 +1,4 @@
+use crate::config;
 use bytes::{Buf, Bytes};
 use std::io::Cursor;
 
@@ -106,7 +107,7 @@ impl Frame {
 
             // Step 5: deal with array
             b'*' => {
-                if depth >= 32 {
+                if depth >= config::MAX_ARRAY_DEPTH {
                     return Err(Error::Other("Wrong message: Too many nested levels"));
                 }
                 // 5.1: get size of array
@@ -117,7 +118,7 @@ impl Frame {
                         // this is a null or empty array
                         Ok(())
                     }
-                    1..1024 => {
+                    1..config::ARRAY_LENGTH_LIMIT_EXCLUSIVE => {
                         // 5.3 deal with recursion
                         for _ in 0..size {
                             Self::check_w_depth(src, depth + 1)?;
@@ -332,7 +333,7 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
-    use std::assert_eq;
+    use std::{assert_eq, format};
 
     use super::*;
 
@@ -623,8 +624,9 @@ mod tests {
     #[test]
     fn test_frame_check_oversized_array() {
         // Test 20: Oversized array header
-        let oversized_array = &b"*1024\r\n"[..];
-        let mut oversized_array_cursor = Cursor::new(oversized_array);
+        let size = config::ARRAY_LENGTH_LIMIT_EXCLUSIVE;
+        let oversized_array = format!("*{size}\r\n");
+        let mut oversized_array_cursor = Cursor::new(oversized_array.as_bytes());
         let oversized_array_result = Frame::check(&mut oversized_array_cursor);
         assert!(matches!(oversized_array_result, Err(Error::Other(_))));
     }
@@ -786,31 +788,40 @@ mod tests {
     #[test]
     fn test_frame_parse_maxsized_array() {
         // Test 17: Array at the maximum supported count
-        let subframe = ":0\r\n".repeat(1023);
-        let maxsized_array = format!("*1023\r\n{subframe}");
+
+        let size = usize::try_from(config::ARRAY_LENGTH_LIMIT_EXCLUSIVE - 1).unwrap();
+        let subframe = ":0\r\n".repeat(size);
+        let maxsized_array = format!("*{size}\r\n{subframe}");
         let mut maxsized_array_cursor = Cursor::new(maxsized_array.as_bytes());
         let maxsized_array_result = Frame::parse(&mut maxsized_array_cursor);
         assert_eq!(
             maxsized_array_result.unwrap(),
             // We do this in order not to derive the Clone trait to `Frame`
-            Frame::Array((0..1023).map(|_| Frame::Integer(0)).collect())
+            Frame::Array((0..size).map(|_| Frame::Integer(0)).collect())
         );
-        assert_eq!(maxsized_array_cursor.position(), 7 + 1023 * 4);
+        // the calculation below is the number of digits for `size`
+        let position = u64::try_from(
+            1 + usize::try_from(size.checked_ilog10().unwrap_or(0) + 1).unwrap() + 4 * size + 2,
+        )
+        .unwrap();
+        assert_eq!(maxsized_array_cursor.position(), position);
     }
 
     #[test]
     fn test_frame_parse_maxnested_array() {
         // Test 18: Array at the maximum supported nesting depth
-        let subframe = "*1\r\n".repeat(32);
+        let level = usize::try_from(config::MAX_ARRAY_DEPTH).unwrap();
+        let subframe = "*1\r\n".repeat(level);
         let maxnested_array = format!("{subframe}:0\r\n");
         let mut maxnested_array_cursor = Cursor::new(maxnested_array.as_bytes());
         let maxnested_array_result = Frame::parse(&mut maxnested_array_cursor);
         // The nested array to compare. We build it in-N-out
         let mut expected = Frame::Integer(0);
-        for _ in 0..32 {
+        for _ in 0..level {
             expected = Frame::Array(vec![expected]);
         }
         assert_eq!(maxnested_array_result.unwrap(), expected);
-        assert_eq!(maxnested_array_cursor.position(), 4 + 32 * 4);
+        let position = u64::try_from(4 * level + 4).unwrap();
+        assert_eq!(maxnested_array_cursor.position(), position);
     }
 }

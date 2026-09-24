@@ -1,5 +1,6 @@
 use bytes::Bytes;
 use mini_redis::acceptor::Acceptor;
+use mini_redis::config;
 use mini_redis::database::Database;
 use mini_redis::metrics::Metrics;
 use mini_redis::requester::Requester;
@@ -28,12 +29,13 @@ async fn test_server(
 
     // allocate the global synchronization channels.
     // The broadcast channel requires a capacity limit.
-    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<()>(512);
+    let (broadcast_tx, _broadcast_rx) =
+        broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
     // The mpsc channel acts as the shutdown latch (capacity 1 is sufficient)
     let (mpsc_tx, mpsc_rx) = mpsc::channel::<()>(1);
 
     // bind the TCP socket to the designated port.
-    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
     // get the assigned address and port
     let address = listener.local_addr()?;
     // initiate a global metric
@@ -77,7 +79,7 @@ mod tests {
             // spawn the task
             set.spawn(async move {
                 // create a TCP client connecting to the server
-                let mut requester = Requester::connect(address, Duration::from_millis(10))
+                let mut requester = Requester::connect(address, config::DEFAULT_CLIENT_IO_TIMEOUT)
                     .await
                     .unwrap();
 

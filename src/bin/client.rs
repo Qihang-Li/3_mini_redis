@@ -1,15 +1,14 @@
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
+use mini_redis::config;
 use mini_redis::requester::Requester;
 use std::error::Error;
 use std::net::SocketAddr;
-use std::println;
-use tokio::time::Duration;
 
 #[derive(Parser, Debug)]
 struct Cli {
     /// The network address of the server
-    #[clap(long, default_value = "127.0.0.1:6379")]
+    #[clap(long, default_value = config::DEFAULT_CLIENT_ADDR)]
     addr: String,
 
     #[clap(subcommand)]
@@ -29,7 +28,7 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
 
     // Step 2: connect to the server
     let socket_addr: SocketAddr = cli.addr.parse().expect("Invalid socket address format");
-    let mut requester = Requester::connect(socket_addr, Duration::from_secs(10)).await?;
+    let mut requester = Requester::connect(socket_addr, config::DEFAULT_CLIENT_IO_TIMEOUT).await?;
 
     // Step 3: branch for `GET` or `SET`
     match cli.command {

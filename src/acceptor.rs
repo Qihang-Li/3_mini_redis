@@ -1,3 +1,4 @@
+use crate::config;
 use crate::database::Database;
 use crate::handler::Handler;
 use crate::metrics::Metrics;
@@ -96,7 +97,7 @@ impl Acceptor {
                                 // log and sleep on all other errors (like OS resource exhaustion)
                                 _ => {
                                     tracing::error!(%error, "failed to accept connection");
-                                    sleep(Duration::from_millis(50)).await;
+                                    sleep(config::ACCEPT_RETRY_DELAY).await;
                                 }
                             }
                         }

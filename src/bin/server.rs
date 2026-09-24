@@ -1,13 +1,13 @@
 use mini_redis::acceptor::Acceptor;
+use mini_redis::config;
 use mini_redis::database::Database;
 use mini_redis::metrics::Metrics;
 use std::error::Error;
 use std::sync::Arc;
-use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::signal;
 use tokio::sync::{broadcast, mpsc};
-use tracing::{Level, info};
+use tracing::info;
 use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
@@ -16,7 +16,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // 0.1 construct a subscriber that prints formatted traces to standard output.
     let subscriber = FmtSubscriber::builder()
         // Defines the max log level to record (TRACE, DEBUG, INFO, WARN, ERROR)
-        .with_max_level(Level::INFO)
+        .with_max_level(config::DEFAULT_LOG_LEVEL)
         // Completes the builder and returns the subscriber
         .finish();
 
@@ -34,12 +34,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 1.2 allocate the global synchronization channels.
     // The broadcast channel requires a capacity limit.
-    let (broadcast_tx, _broadcast_rx) = broadcast::channel::<()>(512);
+    let (broadcast_tx, _broadcast_rx) =
+        broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
     // The mpsc channel acts as the shutdown latch (capacity 1 is sufficient)
     let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<()>(1);
 
     // 1.3 bind the TCP socket to the designated port.
-    let listener = TcpListener::bind("127.0.0.1:6379").await?;
+    let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
     info!("Server listening on port 6379");
 
     // 1.4 prepare an instance of acceptor
@@ -48,8 +49,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         db,
         broadcast_tx.clone(),
         mpsc_tx.clone(),
-        512,
-        Duration::from_mins(10),
+        config::DEFAULT_MAX_CONNECTIONS,
+        config::DEFAULT_SERVER_READ_TIMEOUT,
         Arc::new(Metrics::new()),
     );
 

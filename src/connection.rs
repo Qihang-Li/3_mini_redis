@@ -1,3 +1,4 @@
+use crate::config;
 use crate::frame::Frame;
 use bytes::{Buf, BufMut, BytesMut};
 use std::error::Error;
@@ -21,7 +22,7 @@ impl Connection {
         // Output: buffer as a chuck of memory being 4 KB
         Self {
             stream: BufWriter::new(stream),
-            buffer: BytesMut::with_capacity(4096),
+            buffer: BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY),
         }
     }
 
@@ -44,12 +45,12 @@ impl Connection {
 
             // Step 2: reaching this point means `parse_frame()` returned `Ok(None)`
             // check if there is any remaining byte budget
-            if self.buffer.len() >= 65536 {
+            if self.buffer.len() >= config::MAX_BUFFERED_BYTES {
                 return Err("Frame cannot fit within the buffer limit.".into());
             }
 
             // Step 3: set a limit on how many more bytes the buffer can read from network
-            let bytes_left = 65536 - self.buffer.len();
+            let bytes_left = config::MAX_BUFFERED_BYTES - self.buffer.len();
             let mut destination = (&mut self.buffer).limit(bytes_left);
 
             // Step 4: reaching this point means the buffer does not contain a full frame.
@@ -236,14 +237,14 @@ mod tests {
         // Test 2: Valid full array, sent in parts
         // Step 1: send the first part only
         client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
-        let partial_result = timeout(Duration::from_secs(1), connection.read_frame()).await;
+        let partial_result = timeout(Duration::from_millis(100), connection.read_frame()).await;
         // here `partial_result` should be `Err(Elapsed)`, indicating `read_frame()` is pending
         assert!(partial_result.is_err());
         assert_eq!(&connection.buffer[..], b"*2\r\n$3\r\nfoo\r\n");
 
         // Step 2: now send the second part
         client.write_all(b"$3\r\nbar\r\n").await?;
-        let final_result = timeout(Duration::from_secs(2), connection.read_frame()).await??;
+        let final_result = timeout(Duration::from_millis(200), connection.read_frame()).await??;
         // Step 3: compare data to expectation
         assert_eq!(
             final_result,
@@ -280,10 +281,16 @@ mod tests {
 
         // Test 1: Valid RESP frame exceeding the buffer limit by one byte
         // Step 1: write data to the client
-        let placeholder = "A".repeat(65527);
+        let size = config::MAX_BUFFERED_BYTES + 1
+            - 1
+            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
+                .unwrap()
+            - 2
+            - 2;
+        let placeholder = "A".repeat(size);
         client
             // that's exactly 65537 bytes
-            .write_all(format!("$65527\r\n{placeholder}\r\n").as_bytes())
+            .write_all(format!("${size}\r\n{placeholder}\r\n").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let oversized_frame = connection.read_frame().await;
@@ -293,7 +300,7 @@ mod tests {
             oversized_frame.unwrap_err().to_string(),
             "Frame cannot fit within the buffer limit."
         );
-        assert!(connection.buffer.len() <= 65536);
+        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
@@ -314,20 +321,20 @@ mod tests {
 
         // Test 1: Valid RESP frame exceeding the buffer limit by one byte
         // Step 1: write data to the client
-        let placeholder = "A".repeat(65536);
+        let placeholder = "A".repeat(config::MAX_BUFFERED_BYTES);
         client
             // that's exactly 65537 bytes
             .write_all(format!("+{placeholder}").as_bytes())
             .await?;
         // Step 2: read data from the connection
-        let oversized_frame = connection.read_frame().await;
+        let oversized_frame = timeout(Duration::from_millis(100), connection.read_frame()).await?;
         // Step 3: compare data to expectation
         assert!(oversized_frame.is_err());
         assert_eq!(
             oversized_frame.unwrap_err().to_string(),
             "Frame cannot fit within the buffer limit."
         );
-        assert!(connection.buffer.len() <= 65536);
+        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
@@ -348,17 +355,23 @@ mod tests {
 
         // Test 2: Valid frame of exactly MAX_BUFFERED_BYTES bytes, followed by another frame
         // Step 1: write data to the client
-        let placeholder = "A".repeat(65526);
+        let size = config::MAX_BUFFERED_BYTES
+            - 1
+            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
+                .unwrap()
+            - 2
+            - 2;
+        let placeholder = "A".repeat(size);
         client
             // The bulk frame is exactly 65,536 bytes
-            .write_all(format!("$65526\r\n{placeholder}\r\n:0\r\n").as_bytes())
+            .write_all(format!("${size}\r\n{placeholder}\r\n:0\r\n").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let maxsized_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
         //assert!(maxsized_frame.is_ok());
         assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
-        assert!(connection.buffer.len() <= 65536);
+        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
         let next_frame = connection.read_frame().await?;
         assert_eq!(next_frame, Some(Frame::Integer(0)));
 
@@ -382,10 +395,16 @@ mod tests {
 
         // Test 3: Valid frame, followed by a frame of exactly MAX_BUFFERED_BYTES bytes
         // Step 1: write data to the client
-        let placeholder = "A".repeat(65526);
+        let size = config::MAX_BUFFERED_BYTES
+            - 1
+            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
+                .unwrap()
+            - 2
+            - 2;
+        let placeholder = "A".repeat(size);
         client
             // The bulk frame is exactly 65,536 bytes
-            .write_all(format!(":0\r\n$65526\r\n{placeholder}\r\n").as_bytes())
+            .write_all(format!(":0\r\n${size}\r\n{placeholder}\r\n").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let front_frame = connection.read_frame().await?;
@@ -394,7 +413,7 @@ mod tests {
         // Step 3: compare data to expectation
         //assert!(maxsized_frame.is_ok());
         assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
-        assert!(connection.buffer.len() <= 65536);
+        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
@@ -413,7 +432,7 @@ mod tests {
         // create a connection from the server
         let mut connection = Connection::new(server);
         // create a buffer
-        let mut buffer = BytesMut::with_capacity(4096);
+        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Valid simple frame
         // Step 1: write data to the connection

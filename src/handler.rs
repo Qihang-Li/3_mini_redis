@@ -69,7 +69,7 @@ impl Handler {
                         },
                     };
 
-                    // Step 4: match `read_frame_result` to unpack `connection::read_frame()` results
+                    // Step g: match `read_frame_result` to unpack `connection::read_frame()` results
                     let input_frame = match read_frame_result {
                         // 4.(i) the happy path with a `Frame`
                         Ok(Some(frame)) => frame,
