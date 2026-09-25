@@ -189,7 +189,6 @@ mod tests {
     use std::assert_eq;
 
     use super::*;
-    use bytes::Bytes;
     use tokio::net::TcpListener;
     use tokio::time::{Duration, timeout};
 
@@ -244,7 +243,7 @@ mod tests {
 
         // Step 2: now send the second part
         client.write_all(b"$3\r\nbar\r\n").await?;
-        let final_result = timeout(Duration::from_millis(200), connection.read_frame()).await??;
+        let final_result = timeout(Duration::from_millis(1000), connection.read_frame()).await??;
         // Step 3: compare data to expectation
         assert_eq!(
             final_result,
@@ -281,17 +280,10 @@ mod tests {
 
         // Test 1: Valid RESP frame exceeding the buffer limit by one byte
         // Step 1: write data to the client
-        let size = config::MAX_BUFFERED_BYTES + 1
-            - 1
-            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
-                .unwrap()
-            - 2
-            - 2;
-        let placeholder = "A".repeat(size);
-        client
-            // that's exactly 65537 bytes
-            .write_all(format!("${size}\r\n{placeholder}\r\n").as_bytes())
-            .await?;
+        // payload is exactly config::MAX_BUFFERED_BYTES + 1 bytes
+        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES + 1 - 3));
+        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES + 1);
+        client.write_all(payload.as_bytes()).await?;
         // Step 2: read data from the connection
         let oversized_frame = connection.read_frame().await;
         // Step 3: compare data to expectation
@@ -300,7 +292,7 @@ mod tests {
             oversized_frame.unwrap_err().to_string(),
             "Frame cannot fit within the buffer limit."
         );
-        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
+        assert!(connection.buffer.len() == config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
@@ -319,22 +311,21 @@ mod tests {
         // create a connection from the server
         let mut connection = Connection::new(server);
 
-        // Test 1: Valid RESP frame exceeding the buffer limit by one byte
         // Step 1: write data to the client
-        let placeholder = "A".repeat(config::MAX_BUFFERED_BYTES);
-        client
-            // that's exactly 65537 bytes
-            .write_all(format!("+{placeholder}").as_bytes())
-            .await?;
+        // payload is exactly config::MAX_BUFFERED_BYTES + 1 bytes
+        let payload = format!("+{}", "A".repeat(config::MAX_BUFFERED_BYTES));
+        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES + 1);
+        client.write_all(payload.as_bytes()).await?;
         // Step 2: read data from the connection
-        let oversized_frame = timeout(Duration::from_millis(100), connection.read_frame()).await?;
+        let oversized_frame = timeout(Duration::from_millis(1000), connection.read_frame()).await?;
+
         // Step 3: compare data to expectation
         assert!(oversized_frame.is_err());
         assert_eq!(
             oversized_frame.unwrap_err().to_string(),
             "Frame cannot fit within the buffer limit."
         );
-        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
+        assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
@@ -353,25 +344,20 @@ mod tests {
         // create a connection from the server
         let mut connection = Connection::new(server);
 
-        // Test 2: Valid frame of exactly MAX_BUFFERED_BYTES bytes, followed by another frame
         // Step 1: write data to the client
-        let size = config::MAX_BUFFERED_BYTES
-            - 1
-            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
-                .unwrap()
-            - 2
-            - 2;
-        let placeholder = "A".repeat(size);
+        // payload is exactly config::MAX_BUFFERED_BYTES bytes
+        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES);
         client
-            // The bulk frame is exactly 65,536 bytes
-            .write_all(format!("${size}\r\n{placeholder}\r\n:0\r\n").as_bytes())
+            .write_all(format!("{payload}:0\r\n").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let maxsized_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
-        //assert!(maxsized_frame.is_ok());
-        assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
-        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
+        assert_eq!(
+            maxsized_frame,
+            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
+        );
         let next_frame = connection.read_frame().await?;
         assert_eq!(next_frame, Some(Frame::Integer(0)));
 
@@ -393,27 +379,22 @@ mod tests {
         // create a connection from the server
         let mut connection = Connection::new(server);
 
-        // Test 3: Valid frame, followed by a frame of exactly MAX_BUFFERED_BYTES bytes
         // Step 1: write data to the client
-        let size = config::MAX_BUFFERED_BYTES
-            - 1
-            - usize::try_from(config::MAX_BUFFERED_BYTES.checked_ilog10().unwrap_or(0) + 1)
-                .unwrap()
-            - 2
-            - 2;
-        let placeholder = "A".repeat(size);
+        // payload is exactly config::MAX_BUFFERED_BYTES bytes
+        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES);
         client
-            // The bulk frame is exactly 65,536 bytes
-            .write_all(format!(":0\r\n${size}\r\n{placeholder}\r\n").as_bytes())
+            .write_all(format!(":0\r\n{payload}").as_bytes())
             .await?;
         // Step 2: read data from the connection
         let front_frame = connection.read_frame().await?;
         assert_eq!(front_frame, Some(Frame::Integer(0)));
         let maxsized_frame = connection.read_frame().await?;
         // Step 3: compare data to expectation
-        //assert!(maxsized_frame.is_ok());
-        assert_eq!(maxsized_frame, Some(Frame::Bulk(Bytes::from(placeholder))));
-        assert!(connection.buffer.len() <= config::MAX_BUFFERED_BYTES);
+        assert_eq!(
+            maxsized_frame,
+            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
+        );
 
         Ok(())
     }

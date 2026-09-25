@@ -41,7 +41,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // 1.3 bind the TCP socket to the designated port.
     let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
-    info!("Server listening on port 6379");
+    info!("Server listening on {}", config::DEFAULT_SERVER_BIND_ADDR);
 
     // 1.4 prepare an instance of acceptor
     let mut acceptor = Acceptor::new(

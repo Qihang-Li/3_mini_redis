@@ -35,7 +35,7 @@ async fn test_server(
     let (mpsc_tx, mpsc_rx) = mpsc::channel::<()>(1);
 
     // bind the TCP socket to the designated port.
-    let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
     // get the assigned address and port
     let address = listener.local_addr()?;
     // initiate a global metric
@@ -79,7 +79,7 @@ mod tests {
             // spawn the task
             set.spawn(async move {
                 // create a TCP client connecting to the server
-                let mut requester = Requester::connect(address, config::DEFAULT_CLIENT_IO_TIMEOUT)
+                let mut requester = Requester::connect(address, Duration::from_millis(10))
                     .await
                     .unwrap();
 
