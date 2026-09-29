@@ -185,9 +185,6 @@ impl Connection {
 
 #[cfg(test)]
 mod tests {
-
-    use std::assert_eq;
-
     use super::*;
     use tokio::net::TcpListener;
     use tokio::time::{Duration, timeout};

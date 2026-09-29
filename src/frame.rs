@@ -333,8 +333,6 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
-    use std::{assert_eq, format};
-
     use super::*;
 
     #[test]

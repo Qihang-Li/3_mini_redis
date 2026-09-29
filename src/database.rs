@@ -39,9 +39,8 @@ impl Database {
 
 #[cfg(test)]
 mod test {
+    use super::*;
     use bytes::Bytes;
-
-    use crate::database::Database;
 
     #[test]
     fn test_database_new() {

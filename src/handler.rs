@@ -10,6 +10,24 @@ use tokio::sync::{OwnedSemaphorePermit, broadcast, mpsc};
 use tokio::time::{Duration, timeout};
 
 #[derive(Debug)]
+struct ActiveConnectionGuard {
+    metrics: Arc<Metrics>,
+}
+
+impl ActiveConnectionGuard {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.inc_active_connections();
+        Self { metrics }
+    }
+}
+
+impl Drop for ActiveConnectionGuard {
+    fn drop(&mut self) {
+        self.metrics.dec_active_connections();
+    }
+}
+
+#[derive(Debug)]
 pub struct Handler {
     connection: Connection,
     database: Database,
@@ -48,8 +66,8 @@ impl Handler {
     /// Returns an error if a fatal network boundary is breached, during
     /// transmission, or if the connection times out.
     pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Step 0: increment `active_connections` by 1
-        self.metrics.inc_active_connections();
+        // Step 0: increment `active_connections` by 1 using the guard
+        let _active_connection_guard = ActiveConnectionGuard::new(self.metrics.clone());
 
         // Step 1: start an infinite event loop for client commands continuously
         loop {
@@ -69,7 +87,7 @@ impl Handler {
                         },
                     };
 
-                    // Step g: match `read_frame_result` to unpack `connection::read_frame()` results
+                    // Step 4: match `read_frame_result` to unpack `connection::read_frame()` results
                     let input_frame = match read_frame_result {
                         // 4.(i) the happy path with a `Frame`
                         Ok(Some(frame)) => frame,
@@ -130,10 +148,106 @@ impl Handler {
                 },
             };
         }
+        // Step 9: end of the event loop
+        Ok(())
+        // Step 10: decrement `active_connections` by 1 is automatic
+        // when the guard is dropped after `run()` exits
+    }
+}
 
-        // Step 9: decrement `active_connections` by 1
-        self.metrics.dec_active_connections();
-        // Step 10: end of the event loop
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+    use tokio::sync::{Semaphore, broadcast, mpsc};
+
+    #[tokio::test]
+    async fn test_handler_read_error_releases_active_connection()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create the metrics
+        let metrics = Arc::new(Metrics::new());
+        // create the channel
+        let (_broadcast_tx, broadcast_rx) =
+            broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
+
+        // create a handler
+        let handler = Handler::new(
+            server,
+            Database::new(),
+            broadcast_rx,
+            mpsc::channel::<()>(1).0,
+            Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
+                .clone()
+                .acquire_owned()
+                .await?,
+            config::DEFAULT_SERVER_READ_TIMEOUT,
+            Arc::clone(&metrics),
+        );
+
+        // Step 1: write data to the client
+        // payload is an invalid Redis frame
+        client.write_all(":a\r\n".as_bytes()).await?;
+        // Step 2: execute `Handler::run()`
+        let result = tokio::time::timeout(Duration::from_secs(1), handler.run()).await?;
+        // Step 3: compare data to expectation
+        assert!(result.is_err());
+        assert_eq!(metrics.active_connections(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handler_eof_releases_active_connection()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (server, _) = listener.accept().await?;
+        // create the metrics
+        let metrics = Arc::new(Metrics::new());
+        // create the channel
+        let (_broadcast_tx, broadcast_rx) =
+            broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
+
+        // create a handler
+        let handler = Handler::new(
+            server,
+            Database::new(),
+            broadcast_rx,
+            mpsc::channel::<()>(1).0,
+            Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
+                .clone()
+                .acquire_owned()
+                .await?,
+            config::DEFAULT_SERVER_READ_TIMEOUT,
+            Arc::clone(&metrics),
+        );
+
+        // Step 1: write data to the client
+        // close the client without sending data
+        drop(client);
+        // Step 2: execute `Handler::run()`
+        let result = tokio::time::timeout(Duration::from_secs(1), handler.run()).await?;
+        // Step 3: compare data to expectation
+        assert!(result.is_ok());
+        assert_eq!(metrics.active_connections(), 0);
+
         Ok(())
     }
 }
