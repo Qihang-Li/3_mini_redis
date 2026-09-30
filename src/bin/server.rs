@@ -44,6 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("Server listening on {}", config::DEFAULT_SERVER_BIND_ADDR);
 
     // 1.4 prepare an instance of acceptor
+    let metrics = Arc::new(Metrics::new());
     let mut acceptor = Acceptor::new(
         listener,
         db,
@@ -51,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         mpsc_tx.clone(),
         config::DEFAULT_MAX_CONNECTIONS,
         config::DEFAULT_SERVER_READ_TIMEOUT,
-        Arc::new(Metrics::new()),
+        Arc::clone(&metrics),
     );
 
     // Step 2: Uses `tokio::select!` to race the main thread and shutdown signal
@@ -75,5 +76,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     mpsc_rx.recv().await;
     // 3.3 close the main thread.
     tracing::info!("All tasks are safely shut down.");
+    info!(
+        active_connections = metrics.active_connections(),
+        requests_received = metrics.requests_received(),
+        command_responses_written = metrics.command_responses_written(),
+        cache_hits = metrics.cache_hits(),
+        cache_misses = metrics.cache_misses(),
+        command_parse_errors = metrics.command_parse_errors(),
+        accept_errors = metrics.accept_errors(),
+        "Final server metrics"
+    );
     Ok(())
 }

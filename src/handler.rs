@@ -107,7 +107,7 @@ impl Handler {
                         }
                     };
 
-                    // Step 5: increment `command_responses_written` by 1
+                    // Step 5: increment `requests_received` by 1
                     self.metrics.inc_requests_received();
 
                     // Step 6: Try to get a `Command`
@@ -206,6 +206,8 @@ mod tests {
         // Step 3: compare data to expectation
         assert!(result.is_err());
         assert_eq!(metrics.active_connections(), 0);
+        assert_eq!(metrics.requests_received(), 0);
+        assert_eq!(metrics.command_responses_written(), 0);
 
         Ok(())
     }
@@ -291,7 +293,7 @@ mod tests {
         );
 
         // Step 1: write data to the client
-        // the payload is a valid Redis frame, but the server is disconnected
+        // Send a valid request; server can read it, but its write half is shut down.
         client
             .write_all(b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n")
             .await?;
