@@ -89,8 +89,8 @@ impl Acceptor {
                         },
                         // 4.(ii) wait if listener.accept() gets an io_error
                         Err(error) => {
-                            // increment `rejected_connections` by 1
-                            self.metrics.inc_rejected_connections();
+                            // increment `accept_errors` by 1
+                            self.metrics.inc_accept_errors();
                             match error.kind() {
                                 // ignore transient client disconnections silently
                                 std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset => {},

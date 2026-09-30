@@ -106,7 +106,8 @@ mod tests {
         let _ = broadcast_tx.send(());
         mpsc_rx.recv().await;
 
-        assert_eq!(metrics.total_requests(), 200);
+        assert_eq!(metrics.command_responses_written(), 200);
+        assert_eq!(metrics.requests_received(), 200);
         assert_eq!(metrics.active_connections(), 0);
 
         Ok(())

@@ -107,12 +107,15 @@ impl Handler {
                         }
                     };
 
-                    // Step 5: Try to get a `Command`
-                    let output_frame = match Command::from_frame(input_frame) {
-                        // 5.(i) the happy path with a valid `Command`
+                    // Step 5: increment `command_responses_written` by 1
+                    self.metrics.inc_requests_received();
 
-                        // Step 6: Execute the `Command`
-                        // 6.(i) a get command
+                    // Step 6: Try to get a `Command`
+                    let output_frame = match Command::from_frame(input_frame) {
+                        // 6.(i) the happy path with a valid `Command`
+
+                        // Step 7: Execute the `Command`
+                        // 7.(i) a get command
                         Ok(Command::Get(command)) => {
                             let frame = Command::Get(command).apply(&self.database);
                             match frame {
@@ -124,22 +127,22 @@ impl Handler {
                             }
                             frame // Return the frame to the outer assignment
                         },
-                        // 6.(ii) a set command
+                        // 7.(ii) a set command
                         Ok(Command::Set(command)) => Command::Set(command).apply(&self.database),
 
-                        // 5.(ii) input_frame can't form a valid `Command`
+                        // 6.(ii) input_frame can't form a valid `Command`
                         Err(_) => {
-                            // increment `parse_failures` by 1
-                            self.metrics.inc_parse_failures();
+                            // increment `command_parse_errors` by 1
+                            self.metrics.inc_command_parse_errors();
                             Frame::Error("Wrong message: not a valid command".to_string())
                         }
                     };
 
-                    // Step 7: formating `output_frame` into a response
+                    // Step 8: formating `output_frame` into a response
                     self.connection.write_frame(&output_frame).await?;
 
-                    // Step 8: increment `total_requests` by 1
-                    self.metrics.inc_total_requests();
+                    // Step 9: increment `command_responses_written` by 1
+                    self.metrics.inc_command_responses_written();
                 },
                 // 2.(ii) server shutdown signal comes first
                 _ = self.broadcast_rx.recv() => {
@@ -148,9 +151,9 @@ impl Handler {
                 },
             };
         }
-        // Step 9: end of the event loop
+        // Step 10: end of the event loop
         Ok(())
-        // Step 10: decrement `active_connections` by 1 is automatic
+        // Step 11: decrement `active_connections` by 1 is automatic
         // when the guard is dropped after `run()` exits
     }
 }
@@ -246,6 +249,58 @@ mod tests {
         let result = tokio::time::timeout(Duration::from_secs(1), handler.run()).await?;
         // Step 3: compare data to expectation
         assert!(result.is_ok());
+        assert_eq!(metrics.requests_received(), 0);
+        assert_eq!(metrics.command_responses_written(), 0);
+        assert_eq!(metrics.active_connections(), 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_handler_write_error_increments_request_metrics()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Step 0: environment setup
+        // create a TCP listener (a router or switch)
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // get address of the listener
+        let listener_addr = listener.local_addr().unwrap();
+        // create a TCP client (a gate, either entrance or exit) connecting to the listener
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // create a TCP server  (a gate, either entrance or exit) for the client
+        let (mut server, _) = listener.accept().await?;
+        // shut down the write half before constructing the Handler
+        server.shutdown().await?;
+        // create the metrics
+        let metrics = Arc::new(Metrics::new());
+        // create the channel
+        let (_broadcast_tx, broadcast_rx) =
+            broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
+
+        // create a handler
+        let handler = Handler::new(
+            server,
+            Database::new(),
+            broadcast_rx,
+            mpsc::channel::<()>(1).0,
+            Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
+                .clone()
+                .acquire_owned()
+                .await?,
+            config::DEFAULT_SERVER_READ_TIMEOUT,
+            Arc::clone(&metrics),
+        );
+
+        // Step 1: write data to the client
+        // the payload is a valid Redis frame, but the server is disconnected
+        client
+            .write_all(b"*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n")
+            .await?;
+        // Step 2: execute `Handler::run()`
+        let result = tokio::time::timeout(Duration::from_secs(1), handler.run()).await?;
+        // Step 3: compare data to expectation
+        assert!(result.is_err());
+        assert_eq!(metrics.requests_received(), 1);
+        assert_eq!(metrics.command_responses_written(), 0);
         assert_eq!(metrics.active_connections(), 0);
 
         Ok(())
