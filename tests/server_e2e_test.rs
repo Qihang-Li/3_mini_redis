@@ -1,9 +1,8 @@
 use bytes::BytesMut;
 use mini_redis::acceptor::Acceptor;
+use mini_redis::config;
 use mini_redis::database::Database;
 use mini_redis::metrics::Metrics;
-
-use mini_redis::config;
 use std::error::Error;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -11,12 +10,21 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 use tokio::net::TcpStream;
 use tokio::sync::{broadcast, mpsc};
-use tokio::time::{Duration, sleep};
+use tokio::task::JoinHandle;
+use tokio::time::{Duration, sleep, timeout};
 
 async fn test_server(
     max_connections: usize,
     timeout_duration: Duration,
-) -> Result<(SocketAddr, broadcast::Sender<()>, mpsc::Receiver<()>), Box<dyn Error>> {
+) -> Result<
+    (
+        SocketAddr,
+        broadcast::Sender<()>,
+        mpsc::Receiver<()>,
+        JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
+    ),
+    Box<dyn Error>,
+> {
     // allocate the central memory state.
     let db = Database::new();
 
@@ -43,12 +51,12 @@ async fn test_server(
         Arc::new(Metrics::new()),
     );
 
-    let _handle = tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         // boot the server
-        let _ = acceptor.run().await;
+        acceptor.run().await
     });
 
-    Ok((address, broadcast_tx, mpsc_rx))
+    Ok((address, broadcast_tx, mpsc_rx, handle))
 }
 
 mod tests {
@@ -60,7 +68,8 @@ mod tests {
     #[tokio::test]
     async fn test_happy_path() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
+        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
+            test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
         let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
@@ -92,14 +101,44 @@ mod tests {
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
+
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_shutdown() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
+        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
+            test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
         let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
@@ -111,9 +150,22 @@ mod tests {
         // wait until the acceptor finishes its job of spawning and subcsribing;
         // otherwise, it can't receive the shutdown signal
         sleep(Duration::from_millis(100)).await;
-        // broadcast a signal for graceful shutdown first
+
+        // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
 
         // We only need to verify that the server has dropped the socket.
         // Once a graceful shutdown is finished, `bytes_read` will be 0.
@@ -122,13 +174,29 @@ mod tests {
         // turn off the client
         drop(test_client);
 
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_timeout() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx) =
+        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
             test_server(16, Duration::from_millis(10)).await?;
         // create a buffer for the client to receive data
         let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
@@ -152,7 +220,35 @@ mod tests {
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
+
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
 
         Ok(())
     }
@@ -160,7 +256,8 @@ mod tests {
     #[tokio::test]
     async fn test_protocol_resilience() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx) = test_server(16, Duration::from_secs(60)).await?;
+        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
+            test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
         let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
@@ -192,14 +289,44 @@ mod tests {
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
+
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
+
         Ok(())
     }
 
     #[tokio::test]
     async fn test_concurrency() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx) = test_server(2, Duration::from_secs(60)).await?;
+        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
+            test_server(2, Duration::from_secs(60)).await?;
 
         // The first client
         // create a buffer for the client to receive data
@@ -260,7 +387,36 @@ mod tests {
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
+
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
+
         Ok(())
     }
 }

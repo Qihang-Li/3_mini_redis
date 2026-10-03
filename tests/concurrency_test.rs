@@ -9,8 +9,8 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::{broadcast, mpsc};
-use tokio::task::JoinSet;
-use tokio::time::Duration;
+use tokio::task::{JoinHandle, JoinSet};
+use tokio::time::{Duration, timeout};
 
 async fn test_server(
     max_connections: usize,
@@ -21,6 +21,7 @@ async fn test_server(
         broadcast::Sender<()>,
         mpsc::Receiver<()>,
         Arc<Metrics>,
+        JoinHandle<Result<(), Box<dyn Error + Send + Sync>>>,
     ),
     Box<dyn Error>,
 > {
@@ -52,24 +53,22 @@ async fn test_server(
         metrics.clone(),
     );
 
-    let _handle = tokio::spawn(async move {
+    let handle = tokio::spawn(async move {
         // boot the server
-        let _ = acceptor.run().await;
+        acceptor.run().await
     });
 
-    Ok((address, broadcast_tx, mpsc_rx, metrics))
+    Ok((address, broadcast_tx, mpsc_rx, metrics, handle))
 }
 
 mod tests {
-
-    use std::{assert_eq, time::Duration};
 
     use super::*;
 
     #[tokio::test]
     async fn test_high_concurrency_load() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx, metrics) =
+        let (address, broadcast_tx, mut mpsc_rx, metrics, mut server_handle) =
             test_server(256, Duration::from_secs(60)).await?;
         // create a concurrency barrier
         let mut set = JoinSet::new();
@@ -79,7 +78,7 @@ mod tests {
             // spawn the task
             set.spawn(async move {
                 // create a TCP client connecting to the server
-                let mut requester = Requester::connect(address, Duration::from_millis(10))
+                let mut requester = Requester::connect(address, Duration::from_millis(500))
                     .await
                     .unwrap();
 
@@ -104,7 +103,35 @@ mod tests {
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
-        mpsc_rx.recv().await;
+        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
+            Ok(None) => {}
+            Ok(Some(())) => {
+                server_handle.abort();
+                return Err("unexpected message on shutdown completion channel".into());
+            }
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
+                );
+            }
+        }
+
+        // check the status of the server
+        match timeout(Duration::from_secs(1), &mut server_handle).await {
+            Ok(Ok(Ok(()))) => {}
+            Ok(Ok(Err(server_error))) => {
+                let error: Box<dyn Error> = server_error;
+                return Err(error);
+            }
+            Ok(Err(join_error)) => return Err(join_error.into()),
+            Err(elapsed) => {
+                server_handle.abort();
+                return Err(
+                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
+                );
+            }
+        }
 
         assert_eq!(metrics.command_responses_written(), 200);
         assert_eq!(metrics.requests_received(), 200);
