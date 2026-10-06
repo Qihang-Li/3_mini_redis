@@ -409,50 +409,80 @@ mod tests {
         let (server, _) = listener.accept().await?;
         // create a connection from the server
         let mut connection = Connection::new(server);
-        // create a buffer
-        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Valid simple frame
         // Step 1: write data to the connection
         connection
             .write_frame(&Frame::Simple("Hello, World!".to_string()))
             .await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert_eq!(&buffer[..], b"+Hello, World!\r\n");
+        // Step 2: create the expected result
+        let expected_1 = b"+Hello, World!\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_1 = vec![0u8; expected_1.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_1),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert_eq!(buffer_1.as_slice(), expected_1);
 
         // Test 2: Valid error frame
         // Step 1: write data to the connection
         connection
             .write_frame(&Frame::Error("Error 404 Not Found".to_string()))
             .await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert_eq!(&buffer[..], b"-Error 404 Not Found\r\n");
+        // Step 2: create the expected result
+        let expected_2 = b"-Error 404 Not Found\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_2 = vec![0u8; expected_2.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_2),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert_eq!(buffer_2.as_slice(), expected_2);
 
         // Test 3: Valid integer frame
         // Step 1: write data to the connection
         connection.write_frame(&Frame::Integer(42i64)).await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert_eq!(&buffer[..], b":42\r\n");
+        // Step 2: create the expected result
+        let expected_3 = b":42\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_3 = vec![0u8; expected_3.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_3),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert_eq!(buffer_3.as_slice(), expected_3);
 
         // Test 4: Valid bulk string frame
         // Step 1: write data to the connection
         connection
             .write_frame(&Frame::Bulk("foobar".as_bytes().into()))
             .await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert_eq!(&buffer[..], b"$6\r\nfoobar\r\n");
+        // Step 2: create the expected result
+        let expected_4 = b"$6\r\nfoobar\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_4 = vec![0u8; expected_4.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_4),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert_eq!(buffer_4.as_slice(), expected_4);
 
         // Test 5: Valid error frame
         // Step 1: write data to the connection
@@ -469,23 +499,39 @@ mod tests {
                 ]),
             ]))
             .await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert_eq!(
-            &buffer[..],
-            b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n"
-        );
+        // Step 2: create the expected result
+        let expected_5 = b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_5 = vec![0u8; expected_5.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_5),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert_eq!(buffer_5.as_slice(), expected_5);
 
         // Test 6: Valid error frame
         // Step 1: write data to the connection
         connection.write_frame(&Frame::Null).await?;
-        // Step 2: reset buffer and read data from the client
-        buffer.clear();
-        client.read_buf(&mut buffer).await?;
-        // Step 3: compare data to expectation
-        assert!(&buffer[..] == b"$-1\r\n" || &buffer[..] == b"*-1\r\n");
+        // Step 2: create the expected result
+        let expected_bulk_null = b"$-1\r\n";
+        let expected_array_null = b"*-1\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_6 = vec![0u8; expected_bulk_null.len()];
+        // Step 3: write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            client.read_exact(&mut buffer_6),
+        )
+        .await??;
+        // Step 4: compare data to expectation
+        assert!(
+            buffer_6.as_slice() == expected_bulk_null || buffer_6.as_slice() == expected_array_null
+        );
 
         Ok(())
     }

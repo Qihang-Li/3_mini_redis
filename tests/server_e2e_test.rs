@@ -70,35 +70,46 @@ mod tests {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
             test_server(16, Duration::from_secs(60)).await?;
-        // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Valid set request
-        // clear the buffer
-        buffer.clear();
         // create a TCP client connecting to the server
         let mut test_client = TcpStream::connect(address).await?;
         // the client sends a Redis command "SET Alpha 137"
         test_client
             .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n")
             .await?;
-        // write contents to the buffer
-        test_client.read_buf(&mut buffer).await?;
-        assert_eq!(buffer, b"+OK\r\n"[..]);
+        // the expected result
+        let expected_1 = b"+OK\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_1 = vec![0u8; expected_1.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client.read_exact(&mut buffer_1),
+        )
+        .await??;
+        assert_eq!(buffer_1.as_slice(), expected_1);
 
         // Test 2: Valid get request
-        // clear the buffer
-        buffer.clear();
         // the client sends a Redis command "GET Alpha"
         test_client
             .write_all(b"*2\r\n$3\r\nGET\r\n$5\r\nAlpha\r\n")
             .await?;
-        // write contents to the buffer
-        test_client.read_buf(&mut buffer).await?;
-        assert_eq!(buffer, b"$3\r\n137\r\n"[..]);
+        // the expected result
+        let expected_2 = b"$3\r\n137\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_2 = vec![0u8; expected_2.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            test_client.read_exact(&mut buffer_2),
+        )
+        .await??;
+        assert_eq!(buffer_2.as_slice(), expected_2);
+
         // turn off the client
         drop(test_client);
-
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
         match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
@@ -114,7 +125,6 @@ mod tests {
                 );
             }
         }
-
         // check the status of the server
         match timeout(Duration::from_secs(1), &mut server_handle).await {
             Ok(Ok(Ok(()))) => {}
@@ -169,7 +179,11 @@ mod tests {
 
         // We only need to verify that the server has dropped the socket.
         // Once a graceful shutdown is finished, `bytes_read` will be 0.
-        let bytes_read = test_client.read_buf(&mut buffer).await?;
+        let bytes_read = timeout(
+            Duration::from_millis(500),
+            test_client.read_buf(&mut buffer),
+        )
+        .await??;
         assert_eq!(bytes_read, 0);
         // turn off the client
         drop(test_client);
@@ -213,7 +227,11 @@ mod tests {
             .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n")
             .await?;
         // The connection should be closed by server, hence `bytes_read` is 0.
-        let bytes_read = test_client.read_buf(&mut buffer).await?;
+        let bytes_read = timeout(
+            Duration::from_millis(500),
+            test_client.read_buf(&mut buffer),
+        )
+        .await??;
         assert_eq!(bytes_read, 0);
         // turn off the client
         drop(test_client);
@@ -258,34 +276,44 @@ mod tests {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
             test_server(16, Duration::from_secs(60)).await?;
-        // create a buffer for the client to receive data
-        let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
 
         // Test 1: Invalid Redis frame
         // create a TCP client connecting to the server
         let mut test_client_1 = TcpStream::connect(address).await?;
         // the client sends an invalid Redis frame
         test_client_1.write_all(b"Invalid Redis message").await?;
-        // write contents to the buffer
-        test_client_1.read_buf(&mut buffer).await?;
-        assert_eq!(buffer, b"-Wrong message: Invalid first byte\r\n"[..]);
-        // turn off the client
-        drop(test_client_1);
+        // the expected result
+        let expected_1 = b"-Wrong message: Invalid first byte\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_1 = vec![0u8; expected_1.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_1.read_exact(&mut buffer_1),
+        )
+        .await??;
+        assert_eq!(buffer_1.as_slice(), expected_1);
 
         // Test 2: A valid Redis frame, but invalid as a command
-        // clear the buffer
-        buffer.clear();
         // create a TCP client connecting to the server
         let mut test_client_2 = TcpStream::connect(address).await?;
         // the client sends a valid Redis frame but not supported by the server
         test_client_2
             .write_all(b"*2\r\n$4\r\nDROP\r\n$5\r\nTABLE\r\n")
             .await?;
-        // write contents to the buffer
-        test_client_2.read_buf(&mut buffer).await?;
-        assert_eq!(buffer, b"-Wrong message: not a valid command\r\n"[..]);
-        // turn off the client
-        drop(test_client_2);
+        // the expected result
+        let expected_2 = b"-Wrong message: not a valid command\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_2 = vec![0u8; expected_2.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_2.read_exact(&mut buffer_2),
+        )
+        .await??;
+        assert_eq!(buffer_2.as_slice(), expected_2);
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
@@ -329,30 +357,44 @@ mod tests {
             test_server(2, Duration::from_secs(60)).await?;
 
         // The first client
-        // create a buffer for the client to receive data
-        let mut buffer_1 = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
         // create a TCP client connecting to the server
         let mut test_client_1 = TcpStream::connect(address).await?;
         // the client sends a Redis command "SET One 1"
         test_client_1
             .write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nOne\r\n$1\r\n1\r\n")
             .await?;
-        // write contents to the buffer
-        test_client_1.read_buf(&mut buffer_1).await?;
-        assert_eq!(buffer_1, b"+OK\r\n"[..]);
+        // the expected result
+        let expected_1 = b"+OK\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_1 = vec![0u8; expected_1.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_1.read_exact(&mut buffer_1),
+        )
+        .await??;
+        assert_eq!(buffer_1.as_slice(), expected_1);
 
         // The second client
-        // create a buffer for the client to receive data
-        let mut buffer_2 = BytesMut::with_capacity(4096);
         // create a TCP client connecting to the server
         let mut test_client_2 = TcpStream::connect(address).await?;
         // the client sends a Redis command "SET Two 2"
         test_client_2
             .write_all(b"*3\r\n$3\r\nSET\r\n$3\r\nTwo\r\n$1\r\n2\r\n")
             .await?;
-        // write contents to the buffer
-        test_client_2.read_buf(&mut buffer_2).await?;
-        assert_eq!(buffer_2, b"+OK\r\n"[..]);
+        // the expected result
+        let expected_2 = b"+OK\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_2 = vec![0u8; expected_2.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_2.read_exact(&mut buffer_2),
+        )
+        .await??;
+        assert_eq!(buffer_2.as_slice(), expected_2);
 
         // The third client
         // create a buffer for the client to receive data
@@ -363,6 +405,7 @@ mod tests {
         test_client_3
             .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nThree\r\n$1\r\n3\r\n")
             .await?;
+
         // now `test_client_3` is put in the wait list
         let blocked_read = tokio::time::timeout(
             Duration::from_millis(100),
@@ -373,17 +416,36 @@ mod tests {
 
         // turn off `test_client_1`
         drop(test_client_1);
-        // now `test_client_3` is immediately connected to the server
-        test_client_3.read_buf(&mut buffer_3).await?;
-        assert_eq!(buffer_3, b"+OK\r\n"[..]);
 
-        buffer_3.clear();
+        // Once the first handler releases its permit, the third can be served.
+        // the expected result
+        let expected_3 = b"+OK\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_3 = vec![0u8; expected_3.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_3.read_exact(&mut buffer_3),
+        )
+        .await??;
+        assert_eq!(buffer_3.as_slice(), expected_3);
+        // the client sends a Redis command "GET Three"
         test_client_3
             .write_all(b"*2\r\n$3\r\nGET\r\n$5\r\nThree\r\n")
             .await?;
-        test_client_3.read_buf(&mut buffer_3).await?;
-        // just double-check the `SET` command works as expected
-        assert_eq!(buffer_3, b"$1\r\n3\r\n"[..]);
+        // the expected result
+        let expected_4 = b"$1\r\n3\r\n";
+        // create a buffer for the exact length as the expected result
+        let mut buffer_4 = vec![0u8; expected_4.len()];
+        // write contents to the buffer, wrapped in a timeout
+        timeout(
+            Duration::from_millis(500),
+            // read exact many bytes as the expected result
+            test_client_3.read_exact(&mut buffer_4),
+        )
+        .await??;
+        assert_eq!(buffer_4.as_slice(), expected_4);
 
         // broadcast a signal for graceful shutdown
         let _ = broadcast_tx.send(());
