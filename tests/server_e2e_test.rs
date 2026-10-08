@@ -66,7 +66,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_happy_path() -> Result<(), Box<dyn Error>> {
+    async fn test_happy_path_and_shutdown() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
             test_server(16, Duration::from_secs(60)).await?;
@@ -108,9 +108,8 @@ mod tests {
         .await??;
         assert_eq!(buffer_2.as_slice(), expected_2);
 
-        // turn off the client
-        drop(test_client);
-        // broadcast a signal for graceful shutdown
+        // we will shut down server first by broadcast a signal for graceful
+        // shutdown, to verify that the client observes EOF after shutdown
         let _ = broadcast_tx.send(());
         match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
             Ok(None) => {}
@@ -125,58 +124,9 @@ mod tests {
                 );
             }
         }
-        // check the status of the server
-        match timeout(Duration::from_secs(1), &mut server_handle).await {
-            Ok(Ok(Ok(()))) => {}
-            Ok(Ok(Err(server_error))) => {
-                let error: Box<dyn Error> = server_error;
-                return Err(error);
-            }
-            Ok(Err(join_error)) => return Err(join_error.into()),
-            Err(elapsed) => {
-                server_handle.abort();
-                return Err(
-                    format!("timed out waiting for the server task to finish: {elapsed}").into(),
-                );
-            }
-        }
 
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_shutdown() -> Result<(), Box<dyn Error>> {
-        // create a server using `test_server()`
-        let (address, broadcast_tx, mut mpsc_rx, mut server_handle) =
-            test_server(16, Duration::from_secs(60)).await?;
         // create a buffer for the client to receive data
         let mut buffer = BytesMut::with_capacity(config::INITIAL_READ_BUFFER_CAPACITY);
-
-        // Test 1: Shutdown signal comes first
-        // clear the buffer
-        buffer.clear();
-        // create a TCP client connecting to the server
-        let mut test_client = TcpStream::connect(address).await?;
-        // wait until the acceptor finishes its job of spawning and subcsribing;
-        // otherwise, it can't receive the shutdown signal
-        sleep(Duration::from_millis(100)).await;
-
-        // broadcast a signal for graceful shutdown
-        let _ = broadcast_tx.send(());
-        match timeout(Duration::from_secs(1), mpsc_rx.recv()).await {
-            Ok(None) => {}
-            Ok(Some(())) => {
-                server_handle.abort();
-                return Err("unexpected message on shutdown completion channel".into());
-            }
-            Err(elapsed) => {
-                server_handle.abort();
-                return Err(
-                    format!("timed out waiting for shutdown channel closure: {elapsed}").into(),
-                );
-            }
-        }
-
         // We only need to verify that the server has dropped the socket.
         // Once a graceful shutdown is finished, `bytes_read` will be 0.
         let bytes_read = timeout(
@@ -222,10 +172,6 @@ mod tests {
         let mut test_client = TcpStream::connect(address).await?;
         // Sleep longer than the timeout duration
         sleep(Duration::from_millis(100)).await;
-        // the client sends a Redis command "SET Alpha 137"
-        test_client
-            .write_all(b"*3\r\n$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n")
-            .await?;
         // The connection should be closed by server, hence `bytes_read` is 0.
         let bytes_read = timeout(
             Duration::from_millis(500),

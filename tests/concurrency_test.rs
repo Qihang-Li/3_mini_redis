@@ -65,12 +65,12 @@ mod tests {
 
     use super::*;
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_high_concurrency_load() -> Result<(), Box<dyn Error>> {
         // create a server using `test_server()`
         let (address, broadcast_tx, mut mpsc_rx, metrics, mut server_handle) =
             test_server(256, Duration::from_secs(60)).await?;
-        // create a concurrency barrier
+        // JoinSet tracks the client tasks and their completion
         let mut set = JoinSet::new();
 
         // loop 100 times
