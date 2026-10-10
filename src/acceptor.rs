@@ -8,18 +8,31 @@ use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, broadcast, mpsc};
 use tokio::time::{Duration, sleep};
 
+/// Accepts TCP connections and spawns handlers within a connection limit.
 #[derive(Debug)]
 pub struct Acceptor {
     listener: TcpListener,
     database: Database,
+    // Creates shutdown receivers for this acceptor and its handlers.
     broadcast_tx: broadcast::Sender<()>,
+    // Keeps the shutdown-completion channel open; handlers receive clones.
     mpsc_tx: mpsc::Sender<()>,
     semaphore: Arc<Semaphore>,
+    // Supplies the frame-read timeout used by each handler.
     timeout_duration: Duration,
     metrics: Arc<Metrics>,
 }
 
 impl Acceptor {
+    /// Creates an acceptor with shared state and a limit on handlers.
+    ///
+    /// Uses `max_connections` as the initial number of semaphore permits and
+    /// passes `timeout_duration` to each handler as its frame-read timeout.
+    /// A zero connection limit leaves `run()` waiting for its first permit.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `max_connections` exceeds [`Semaphore::MAX_PERMITS`].
     pub fn new(
         listener: TcpListener,
         database: Database,
@@ -40,30 +53,46 @@ impl Acceptor {
         }
     }
 
-    /// Runs an infinite loop as a router for main business logic
+    /// Accepts client connections and spawns a handler for each one.
+    ///
+    /// Reserves a semaphore permit before each accept attempt. At the
+    /// connection limit, waits for capacity before accepting again.
+    ///
+    /// Returns `Ok(())` when the shutdown receive branch is selected, including
+    /// when the receive operation returns an error. This method does not wait
+    /// for spawned handlers to finish.
+    ///
+    /// The shutdown receiver is not polled while waiting for a permit or
+    /// sleeping after an accept error.
     ///
     /// # Errors
-    /// Returns an error if network stack of OS crashes,
-    /// or if a fatal OS resource limit is breached.
+    ///
+    /// Propagates a permit-acquisition error if the semaphore is closed.
+    /// The current implementation does not close this semaphore.
+    ///
+    /// Accept errors are counted and retried. Handler errors are logged inside
+    /// their spawned tasks rather than returned by this method.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Step 1: set up the broadcast receiver for Listener
+        // Step 1: Subscribe to shutdown notifications
         let mut broadcast_rx_acceptor = self.broadcast_tx.subscribe();
 
-        // Step 2: start an infinite loop and prepare semaphore inside
+        // Step 2: Reserve a connection slot before each accept attempt
         loop {
+            // Keep the permit until it is moved into a handler or dropped.
             let permit = self.semaphore.clone().acquire_owned().await?;
 
-            // Step 3: use `tokio::select!` for the race
+            // Step 3: Wait for an accept result or shutdown notification
+            // Neither branch has fixed priority when both are ready.
             tokio::select! {
-                // 3.(i) the business logic comes first
+                // Accept operation completed
                 result = self.listener.accept() => {
 
-                    // Step 4: match the `result`
+                    // Step 4: Handle the accept result
                     match result {
-                        // 4.(i) The main business logic
+                        // Accepted connection
                         Ok((socket, _)) => {
 
-                            // Step 5: prepare tools for the spawned task
+                            // Step 5: Prepare shared handles for the task
                             let db_clone = self.database.clone();
                             let broadcast_rx_handler = self.broadcast_tx.subscribe();
                             let mpsc_tx_clone = self.mpsc_tx.clone();
@@ -71,7 +100,8 @@ impl Acceptor {
                             let metrics = self.metrics.clone();
                             let _handle = tokio::spawn(async move {
 
-                                // Step 6: execute the business logic by `handler`
+                                // Step 6: Create the handler with the permit
+                                // Dropping the handler releases its permit.
                                 let handler = Handler::new(
                                     socket,
                                     db_clone,
@@ -81,20 +111,20 @@ impl Acceptor {
                                     timeout_duration,
                                     metrics,
                                 );
-                                // await the future and evaluate the Result
+                                // Run the handler and log any returned error.
                                 if let Err(error) = handler.run().await {
                                     tracing::error!(%error, "Handler failed to execute");
                                 }
                             });
                         },
-                        // 4.(ii) wait if listener.accept() gets an io_error
+                        // Accept failed
                         Err(error) => {
-                            // increment `accept_errors` by 1
+                            // Count every accept failure.
                             self.metrics.inc_accept_errors();
                             match error.kind() {
-                                // ignore transient client disconnections silently
+                                // Retry these errors immediately.
                                 std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset => {},
-                                // log and sleep on all other errors (like OS resource exhaustion)
+                                // Log other errors and delay the next attempt.
                                 _ => {
                                     tracing::error!(%error, "failed to accept connection");
                                     sleep(config::ACCEPT_RETRY_DELAY).await;
@@ -103,9 +133,9 @@ impl Acceptor {
                         }
                     }
                 },
-                // 3.(ii) the server shutdown signal comes first
+                // Shutdown receive completed
                 _ = broadcast_rx_acceptor.recv() => {
-                    // quit the loop once the shutdown signal is received
+                    // Stop on either a message or a receive error.
                     tracing::info!("Shutdown signal received from OS");
                     break;
                 }

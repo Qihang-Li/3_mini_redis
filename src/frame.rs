@@ -29,14 +29,16 @@ pub enum Frame {
 }
 
 impl Frame {
-    /// Checks the structural completeness of one frame at the current cursor position.
+    /// Checks one frame's structural completeness at the current position.
     ///
     /// On success, advances the cursor past that frame. Content decoding may
     /// still fail, for example if an integer frame contains nonnumeric text.
+    /// The input bytes are not modified.
     ///
     /// # Errors
     /// Returns `Error::Incomplete` if more input is needed.
-    /// Returns `Error::Other` for invalid framing or invalid length fields.
+    /// Returns `Error::Other` for invalid framing, invalid length fields,
+    /// or an exceeded array length or nesting limit.
     /// The cursor position after an error is unspecified.
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), Error> {
         let depth = 0;
@@ -44,60 +46,62 @@ impl Frame {
         Ok(())
     }
 
+    /// Checks one frame while tracking the number of enclosing arrays.
+    ///
+    /// A top-level frame starts at depth zero. Each array checks its children
+    /// at the next depth.
     fn check_w_depth(src: &mut Cursor<&[u8]>, depth: i32) -> Result<(), Error> {
-        // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
-        // Output: either Ok() showing a full frame, or Error of a kind
-
-        // Step 1: check if the cursor is pointing at an empty buffer
+        // Step 1: Check that input remains at the cursor
         if !src.has_remaining() {
-            // this is an empty line []
+            // A missing frame or array element requires more input.
             return Err(Error::Incomplete);
         }
 
-        // Step 2: match the first byte
+        // Step 2: Read the frame marker and select its format
         let first_byte = src.get_u8();
         match first_byte {
-            // Step 3: deal with simple, error, or integer
+            // Simple strings, error frames, and integer frames
             b'+' | b'-' | b':' => {
                 let _bytes = Frame::get_line(src)?;
-                // this is a valid simple, error, or integer
+                // The line is complete; its contents are not decoded here.
                 Ok(())
             }
 
-            // Step 4: deal with bulk
+            // Bulk string
             b'$' => {
-                // 4.1: get length of bulk string
+                // Read the declared payload length.
                 let length = Frame::get_decimal(src)?;
-                // 4.2: match length of bulk string
+                // Handle null, nonnegative, and invalid negative lengths.
                 match length {
                     -1 => {
-                        // this is a null bulk string
+                        // Null bulk string
                         Ok(())
                     }
                     l if l >= 0 => {
                         let length_usize = usize::try_from(length)
                             .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                        // Include the two-byte CRLF terminator.
                         let length_required = length_usize
                             .checked_add(2)
                             .ok_or(Error::Other("Wrong message: Length overflow"))?;
-                        // 4.3 check remaining buffer length
+                        // Require the full payload and its terminator.
                         if src.remaining() >= length_required {
-                            // 4.4: advance cursor and compare to \r\n
+                            // Skip the payload, then validate CRLF.
                             src.advance(length_usize);
                             if src.get_u8() == 13 && src.get_u8() == 10 {
-                                // this is a valid bulk string
+                                // The payload and terminator are complete.
                                 return Ok(());
                             }
-                            // this is an invalid bulk string not ending with \r\n
+                            // The payload is complete, but CRLF is invalid.
                             return Err(Error::Other(
                                 "Wrong message: Invalid ending for bulk string",
                             ));
                         }
-                        // this is an incomplete bulk string
+                        // The payload or its terminator is incomplete.
                         Err(Error::Incomplete)
                     }
                     _ => {
-                        // this is a bulk string with negative length
+                        // Negative lengths other than `-1` are invalid.
                         Err(Error::Other(
                             "Wrong message: Invalid length for bulk string",
                         ))
@@ -105,38 +109,39 @@ impl Frame {
                 }
             }
 
-            // Step 5: deal with array
+            // Array
             b'*' => {
+                // Reject an array that would exceed the nesting limit.
                 if depth >= config::MAX_ARRAY_DEPTH {
                     return Err(Error::Other("Wrong message: Too many nested levels"));
                 }
-                // 5.1: get size of array
+                // Read the declared number of elements.
                 let size = Frame::get_decimal(src)?;
-                // 5.2: match size of array
+                // Handle null, empty, and nonempty arrays.
                 match size {
                     -1..=0 => {
-                        // this is a null or empty array
+                        // Null or empty array
                         Ok(())
                     }
                     1..config::ARRAY_LENGTH_LIMIT_EXCLUSIVE => {
-                        // 5.3 deal with recursion
+                        // Check each child at the next nesting depth.
                         for _ in 0..size {
+                            // If no bytes remain, this call returns
+                            // `Error::Incomplete`.
                             Self::check_w_depth(src, depth + 1)?;
-                            // if we have a interstitial fragmented array here,
-                            // the "next inner frame" shall be [], and trigger
-                            // Err(Incomplete) by the first line in check()
                         }
                         Ok(())
                     }
                     _ => {
-                        // this is a array of negative length or length >= 1024
+                        // Reject lengths below `-1` or at or above the
+                        // configured exclusive limit.
                         Err(Error::Other("Wrong message: Invalid size for array"))
                     }
                 }
             }
 
             _ => {
-                // this is a frame not starting with =-:$*
+                // Supported markers are `+`, `-`, `:`, `$`, and `*`.
                 Err(Error::Other("Wrong message: Invalid first byte"))
             }
         }
@@ -144,18 +149,20 @@ impl Frame {
 
     /// Parses one frame starting at the current cursor position.
     ///
-    /// Performs its own structural check; callers do not need to call `check` first.
-    /// On success, advances the cursor past the frame, leaving subsequent bytes unread.
+    /// Performs its own structural check; callers do not need to call
+    /// `check` first. On success, advances past the parsed frame and leaves
+    /// subsequent bytes unread.
     ///
     /// # Errors
     /// Returns `Error::Incomplete` if more input is needed.
-    /// Returns `Error::Other` for invalid input or an exceeded implementation limit.
+    /// Returns `Error::Other` for invalid input or exceeded resource limits.
     /// The cursor position after an error is unspecified.
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
         let cursor_position = src.position();
 
         match Self::check(src) {
             Ok(()) => {
+                // Rewind to decode the frame from its original start.
                 src.set_position(cursor_position);
                 Self::parse_data(src)
             }
@@ -170,21 +177,19 @@ impl Frame {
     /// enclosing array was checked recursively.
     ///
     /// # Errors
-    /// Returns an error if content decoding fails or an implementation limit
-    /// is exceeded.
+    /// Returns `Error::Other` if content decoding fails, for example because
+    /// of invalid UTF-8 or an integer outside the `i64` range.
     fn parse_data(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
-        // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
-        // Output: either Ok(Frame) for a full frame, or Error of a kind
-
-        // Step 1: match the first byte
+        // Read the frame marker and select its format.
         let first_byte = src.get_u8();
         match first_byte {
-            // Step 2: deal with simple
+            // Simple string or error frame
             b'+' | b'-' => {
                 let content = Frame::get_line(src)?;
+                // Copy the contents into an owned UTF-8 string.
                 let result = String::from_utf8(content.to_vec())
                     .map_err(|_| Error::Other("Wrong message: Invalid UTF-8"))?;
-                // this is a valid simple or error
+                // Select the variant after validating UTF-8.
                 if first_byte == b'+' {
                     Ok(Frame::Simple(result))
                 } else {
@@ -192,40 +197,38 @@ impl Frame {
                 }
             }
 
-            // Step 3: deal with simple, error, or integer
+            // Integer frame
             b':' => {
                 let result = Frame::get_decimal(src)?;
-                // this is a valid simple, error, or integer
                 Ok(Frame::Integer(result))
             }
 
-            // Step 4: deal with bulk
+            // Bulk string
             b'$' => {
-                // 4.1: get length of bulk string
+                // Read the declared payload length.
                 let length = Frame::get_decimal(src)?;
-                // 4.2: match length of bulk string
+                // A null bulk string has no payload.
                 if length == -1 {
                     return Ok(Frame::Null);
                 }
                 let length_usize = usize::try_from(length)
                     .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
-                // 4.3 collect the output
+                // Copy the payload into an owned `Bytes` value.
                 let result = Bytes::copy_from_slice(&src.chunk()[..length_usize]);
-                // move cursor forward by length + 2
+                // Skip the payload and its already-checked CRLF terminator.
                 src.advance(length_usize + 2);
-                // this is an valid bulk string
                 Ok(Frame::Bulk(result))
             }
 
-            // Step 5: deal with array
+            // Array
             b'*' => {
-                // 5.1: get size of array
+                // Read the declared number of elements.
                 let size = Frame::get_decimal(src)?;
-                // 5.2: match size of array
+                // A null array has no elements.
                 if size == -1 {
                     return Ok(Frame::Null);
                 }
-                // 5.3 deal with recursion
+                // Decode children already covered by the structural check.
                 let mut result = Vec::with_capacity(
                     usize::try_from(size)
                         .map_err(|_| Error::Other("Wrong message: Length overflow"))?,
@@ -237,79 +240,92 @@ impl Frame {
             }
 
             _ => {
-                // a cursor has passed check() should never reach here
+                // Successful structural checking excludes this branch.
                 Err(Error::Other("Wrong message: Invalid first byte"))
             }
         }
     }
 
+    /// Reads one CRLF-terminated line at the current cursor position.
+    ///
+    /// Returns the line contents as a borrowed slice, excluding CRLF.
+    /// On success, advances past CRLF without modifying the input bytes.
+    ///
+    /// # Errors
+    /// Returns `Error::Incomplete` if no `\r` is found or the first `\r`
+    /// has no following byte.
+    /// Returns `Error::Other` if the byte after the first `\r` is not `\n`,
+    /// or if the cursor position cannot be represented as `usize`.
     fn get_line<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], Error> {
-        // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
-        // Output: either Ok(&[u8]) as the contents to the buffer, or Error
-
-        // Step 1: get the current content and position of the Cursor
+        // Step 1: Borrow the unread bytes and record the cursor position
         let line = src.chunk();
         let pos = usize::try_from(src.position())
             .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
 
-        // Step 2: scan the content and try to find the first "\r"
+        // Step 2: Scan for a carriage return
         for index in 0..line.len() {
             if line[index] == 13 {
-                // This is a successful search. continue on the rest
+                // A carriage return needs a following byte.
                 if index + 1 < line.len() {
-                    // Step 3: check if "\n" comes right behind the "\r"
+                    // Step 3: Check for the following line feed
                     if line[index + 1] == 10 {
-                        // This is for a valid line like "hello world\r\n"
-                        // or, a superflous line which contains a valid line
-
-                        // use get_ref() in order not to modify line
+                        // A complete line may be followed by more input.
+                        // Keep the returned slice tied to the input's lifetime.
                         let result = &src.get_ref()[pos..pos + index];
-                        // cut off the already-read bytes
+                        // Advance past CRLF without removing input bytes.
                         src.advance(index + 2);
                         return Ok(result);
                     }
-                    // This is for a wrong line like "dolor \rsit"
+                    // A different byte after the carriage return is malformed.
                     return Err(Error::Other("Wrong message: '\r' not followed by '\n'"));
                 }
-                // This is for an incomplete line like "Lorem Ipsum\r"
+                // The input ends immediately after `\r`.
                 return Err(Error::Incomplete);
             }
         }
-        // here is for an incomplete line like "Lorem Ipsum"
+        // No carriage return was found in the available input.
         Err(Error::Incomplete)
     }
 
+    /// Parses one CRLF-terminated decimal integer as an `i64`.
+    ///
+    /// Accepts ASCII digits with an optional leading `-`, but no leading `+`.
+    /// Once `get_line` succeeds, the cursor remains past the line's CRLF even
+    /// if numeric decoding fails.
+    ///
+    /// # Errors
+    /// Propagates errors from `get_line`.
+    /// Returns `Error::Other` for an empty line, invalid digits or sign,
+    /// or a value outside the `i64` range.
     fn get_decimal(src: &mut Cursor<&[u8]>) -> Result<i64, Error> {
-        // Input: src as a Cursor to a buffer, allowing us to modify the buffer.
-        // Output: either Ok(i64) as the number of the buffer, or Error
-
-        // Step 1: get the slice using get_line, or return corresponding error
+        // Step 1: Read a CRLF-terminated line
         let mut line = Frame::get_line(src)?;
 
-        // Step 2: check if the slice is empty, and set up variables
+        // Step 2: Reject an empty line and initialize the accumulator
         if !line.has_remaining() {
             return Err(Error::Other("Wrong message: Empty line"));
         }
         let mut is_pos = 1i64;
         let mut result = 0i64;
 
-        // Step 3: deal with possible "-" signs in the beginning
+        // Step 3: Read an optional minus sign or the first digit
         let first_byte = line.get_u8();
         match first_byte {
-            // 45 is the ascii code of -1
+            // ASCII `'-'`
             45 => is_pos = -1,
-            // 48~57 are the ascii code of 0~9
+            // ASCII digits `'0'` through `'9'`
             48..=57 => result = i64::from(first_byte - 48),
             _ => {
                 return Err(Error::Other("Wrong message: Not a number"));
             }
         }
         if !line.has_remaining() && (is_pos == -1) {
-            // This is nothing but a single "-\r\n"
+            // A minus sign must be followed by at least one digit.
             return Err(Error::Other("Wrong message: Not a number"));
         }
 
-        // Step 4: handle the remaining bytes
+        // Step 4: Accumulate the remaining digits with checked arithmetic
+        // Accumulate negative values directly so `i64::MIN` is representable.
         while line.has_remaining() {
             result = result
                 .checked_mul(10)
@@ -317,7 +333,6 @@ impl Frame {
             let byte = line.get_u8();
             match byte {
                 48..=57 => {
-                    //result += i64::from(byte - 48);
                     result = result
                         .checked_add(is_pos * i64::from(byte - 48))
                         .ok_or(Error::Other("Wrong message: Integer overflow"))?;
@@ -353,28 +368,28 @@ mod tests {
 
     #[test]
     fn test_frame_get_line() {
-        // Test 1: Valid clean line
+        // Complete line
         let valid_line = &b"hello world\r\n"[..];
         let mut valid_cursor = Cursor::new(valid_line);
         let valid_bytes = Frame::get_line(&mut valid_cursor);
         assert_eq!(valid_bytes.unwrap(), b"hello world");
         assert_eq!(valid_cursor.position(), 13);
 
-        // Test 2: Superfluous pipelined data
+        // Trailing input remains unread
         let superfluous_line = &b"2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut superfluous_cursor = Cursor::new(superfluous_line);
         let superfluous_bytes = Frame::get_line(&mut superfluous_cursor);
         assert_eq!(superfluous_bytes.unwrap(), b"2");
         assert_eq!(superfluous_cursor.position(), 3);
 
-        // Test 3: Inadequate line
+        // Missing CRLF terminator
         let inadequate_line = &b"Lorem Ipsum"[..];
         let mut inadequate_cursor = Cursor::new(inadequate_line);
         let inadequate_bytes = Frame::get_line(&mut inadequate_cursor);
         assert!(matches!(inadequate_bytes, Err(Error::Incomplete)));
         assert_eq!(inadequate_cursor.position(), 0);
 
-        // Test 4: Wrong line
+        // Carriage return not followed by line feed
         let wrong_line = &b"dolor \rsit"[..];
         let mut wrong_cursor = Cursor::new(wrong_line);
         let wrong_bytes = Frame::get_line(&mut wrong_cursor);
@@ -383,92 +398,98 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_get_decimal() {
-        // Test 1: Valid positive number
+    fn test_frame_get_decimal_valid() {
+        // Positive integer
         let valid_pos = &b"42\r\n"[..];
         let mut valid_pos_cursor = Cursor::new(valid_pos);
         let valid_pos_int = Frame::get_decimal(&mut valid_pos_cursor);
         assert_eq!(valid_pos_int.unwrap(), 42i64);
         assert_eq!(valid_pos_cursor.position(), 4);
 
-        // Test 2: Valid negative number
+        // Negative integer
         let valid_neg = &b"-137\r\n"[..];
         let mut valid_neg_cursor = Cursor::new(valid_neg);
         let valid_neg_int = Frame::get_decimal(&mut valid_neg_cursor);
         assert_eq!(valid_neg_int.unwrap(), -137i64);
         assert_eq!(valid_neg_cursor.position(), 6);
 
-        // Test 3: Valid single digit number
+        // Single-digit integer
         let valid_sig = &b"9\r\n"[..];
         let mut valid_sig_cursor = Cursor::new(valid_sig);
         let valid_sig_int = Frame::get_decimal(&mut valid_sig_cursor);
         assert_eq!(valid_sig_int.unwrap(), 9i64);
         assert_eq!(valid_sig_cursor.position(), 3);
 
-        // Test 4: Superfluous pipelined data
+        // Trailing input remains unread
         let superfluous_num = &b"2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut superfluous_cursor = Cursor::new(superfluous_num);
         let superfluous_int = Frame::get_decimal(&mut superfluous_cursor);
         assert_eq!(superfluous_int.unwrap(), 2i64);
         assert_eq!(superfluous_cursor.position(), 3);
+    }
 
-        // Test 5: Inadequate line
+    #[test]
+    fn test_frame_get_decimal_errors() {
+        // Missing CRLF terminator
         let inadequate_num = &b"299792458"[..];
         let mut inadequate_cursor = Cursor::new(inadequate_num);
         let inadequate_int = Frame::get_decimal(&mut inadequate_cursor);
         assert!(matches!(inadequate_int, Err(Error::Incomplete)));
         assert_eq!(inadequate_cursor.position(), 0);
 
-        // Test 6: Non-integer line
+        // Nonnumeric contents
         let non_num = &b"No. 1729\r\n"[..];
         let mut non_cursor = Cursor::new(non_num);
         let non_int = Frame::get_decimal(&mut non_cursor);
         assert!(matches!(non_int, Err(Error::Other(_))));
         assert_eq!(non_cursor.position(), 10);
 
-        // Test 7: Only minus sign line
+        // Minus sign without digits
         let only_min = &b"-\r\n"[..];
         let mut min_cursor = Cursor::new(only_min);
         let min_int = Frame::get_decimal(&mut min_cursor);
         assert!(matches!(min_int, Err(Error::Other(_))));
         assert_eq!(min_cursor.position(), 3);
 
-        // Test 8: Unexpected minus sign line
+        // Minus sign after digits
         let wrong_min = &b"42-137\r\n"[..];
         let mut wrong_cursor = Cursor::new(wrong_min);
         let wrong_int = Frame::get_decimal(&mut wrong_cursor);
         assert!(matches!(wrong_int, Err(Error::Other(_))));
         assert_eq!(wrong_cursor.position(), 8);
+    }
 
-        // Test 9: Integer being i64::MAX
+    #[test]
+    fn test_frame_get_decimal_limits() {
+        // Maximum `i64` value
         let i64max = &b"9223372036854775807\r\n"[..];
         let mut i64max_cursor = Cursor::new(i64max);
         let i64max_int = Frame::get_decimal(&mut i64max_cursor);
         assert_eq!(i64max_int.unwrap(), i64::MAX);
         assert_eq!(i64max_cursor.position(), 21);
 
-        // Test 10: Integer being i64::MAX + 1
+        // One above `i64::MAX`
         let i64max_p1 = &b"9223372036854775808\r\n"[..];
         let mut i64max_p1_cursor = Cursor::new(i64max_p1);
         let i64max_p1_int = Frame::get_decimal(&mut i64max_p1_cursor);
         assert!(matches!(i64max_p1_int, Err(Error::Other(_))));
         assert_eq!(i64max_p1_cursor.position(), 21);
 
-        // Test 11: Integer being i64::MIN
+        // Minimum `i64` value
         let i64min = &b"-9223372036854775808\r\n"[..];
         let mut i64min_cursor = Cursor::new(i64min);
         let i64min_int = Frame::get_decimal(&mut i64min_cursor);
         assert_eq!(i64min_int.unwrap(), i64::MIN);
         assert_eq!(i64min_cursor.position(), 22);
 
-        // Test 12: Integer being i64::MIN - 1
+        // One below `i64::MIN`
         let i64min_p1 = &b"-9223372036854775809\r\n"[..];
         let mut i64min_p1_cursor = Cursor::new(i64min_p1);
         let i64min_p1_int = Frame::get_decimal(&mut i64min_p1_cursor);
         assert!(matches!(i64min_p1_int, Err(Error::Other(_))));
         assert_eq!(i64min_p1_cursor.position(), 22);
 
-        // Test 13: Integer being i64::MAX * 10
+        // Multiplication overflow (`i64::MAX * 10`)
         let i64max_x10 = &b"92233720368547758070\r\n"[..];
         let mut i64max_x10_cursor = Cursor::new(i64max_x10);
         let i64max_x10_int = Frame::get_decimal(&mut i64max_x10_cursor);
@@ -477,135 +498,82 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_check() {
-        // Test 1: Valid simple string
+    fn test_frame_check_line_frames() {
+        // Simple string
         let valid_simple = &b"+Hello, world!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
         let simple_result = Frame::check(&mut simple_cursor);
         assert!(simple_result.is_ok());
         assert_eq!(simple_cursor.position(), 16);
 
-        // Test 2: Valid error
+        // Error frame
         let valid_error = &b"-Error 404 Not Found\r\n"[..];
         let mut error_cursor = Cursor::new(valid_error);
         let error_result = Frame::check(&mut error_cursor);
         assert!(error_result.is_ok());
         assert_eq!(error_cursor.position(), 22);
 
-        // Test 3: Valid integer
+        // Integer frame
         let valid_integer = &b":42\r\n"[..];
         let mut integer_cursor = Cursor::new(valid_integer);
         let integer_result = Frame::check(&mut integer_cursor);
         assert!(integer_result.is_ok());
         assert_eq!(integer_cursor.position(), 5);
+    }
 
-        // Test 4: Valid bulk string
+    #[test]
+    fn test_frame_check_bulk() {
+        // Bulk string
         let valid_bulk = &b"$6\r\nfoobar\r\n"[..];
         let mut bulk_cursor = Cursor::new(valid_bulk);
         let bulk_result = Frame::check(&mut bulk_cursor);
         assert!(bulk_result.is_ok());
         assert_eq!(bulk_cursor.position(), 12);
 
-        // Test 5: Valid empty bulk string
+        // Empty bulk string
         let valid_emptybulk = &b"$0\r\n\r\n"[..];
         let mut emptybulk_cursor = Cursor::new(valid_emptybulk);
         let emptybulk_result = Frame::check(&mut emptybulk_cursor);
         assert!(emptybulk_result.is_ok());
         assert_eq!(emptybulk_cursor.position(), 6);
 
-        // Test 6: Valid null bulk string
+        // Null bulk string
         let valid_nullbulk = &b"$-1\r\n"[..];
         let mut nullbulk_cursor = Cursor::new(valid_nullbulk);
         let nullbulk_result = Frame::check(&mut nullbulk_cursor);
         assert!(nullbulk_result.is_ok());
         assert_eq!(nullbulk_cursor.position(), 5);
 
-        // Test 7: Inadequate bulk string
+        // Incomplete bulk payload
         let inadequate_bulk = &b"$6\r\nfoo"[..];
         let mut inadequate_bulk_cursor = Cursor::new(inadequate_bulk);
         let inadequate_bulk_result = Frame::check(&mut inadequate_bulk_cursor);
         assert!(matches!(inadequate_bulk_result, Err(Error::Incomplete)));
-        // get_decimal() advances cursor at f
+        // The cursor is at the payload after reading the length field.
         assert_eq!(inadequate_bulk_cursor.position(), 4);
 
-        // Test 8: Valid array
-        let valid_array = &b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
-        let mut array_cursor = Cursor::new(valid_array);
-        let array_result = Frame::check(&mut array_cursor);
-        assert!(array_result.is_ok());
-        assert_eq!(array_cursor.position(), 22);
-
-        // Test 9: Valid nested array
-        let valid_nestarray = &b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n"[..];
-        let mut nestarray_cursor = Cursor::new(valid_nestarray);
-        let nestarray_result = Frame::check(&mut nestarray_cursor);
-        assert!(nestarray_result.is_ok());
-        assert_eq!(nestarray_cursor.position(), 36);
-
-        // Test 10: Valid empty array
-        let valid_emptyarray = &b"*0\r\n"[..];
-        let mut emptyarray_cursor = Cursor::new(valid_emptyarray);
-        let emptyarray_result = Frame::check(&mut emptyarray_cursor);
-        assert!(emptyarray_result.is_ok());
-        assert_eq!(emptyarray_cursor.position(), 4);
-
-        // Test 11: Valid null array
-        let valid_nullarray = &b"*-1\r\n"[..];
-        let mut nullarray_cursor = Cursor::new(valid_nullarray);
-        let nullarray_result = Frame::check(&mut nullarray_cursor);
-        assert!(nullarray_result.is_ok());
-        assert_eq!(nullarray_cursor.position(), 5);
-
-        // Test 12: Interstitial fragmented array
-        let cutoff_array = &b"*2\r\n$3\r\nfoo\r\n"[..];
-        let mut cutoff_cursor = Cursor::new(cutoff_array);
-        let cutoff_result = Frame::check(&mut cutoff_cursor);
-        assert!(matches!(cutoff_result, Err(Error::Incomplete)));
-        assert_eq!(cutoff_cursor.position(), 13);
-
-        // Test 13: Empty data
-        let empty_data = &b""[..];
-        let mut empty_cursor = Cursor::new(empty_data);
-        let empty_result = Frame::check(&mut empty_cursor);
-        assert!(matches!(empty_result, Err(Error::Incomplete)));
-        assert_eq!(empty_cursor.position(), 0);
-
-        // Test 14: Invalid first byte
-        let wrong_1stbyte = &b"&hello world\r\n"[..];
-        let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
-        let wrong_1stbyte_result = Frame::check(&mut wrong_1stbyte_cursor);
-        assert!(matches!(wrong_1stbyte_result, Err(Error::Other(_))));
-        assert_eq!(wrong_1stbyte_cursor.position(), 1);
-
-        // Test 15: Invalid bulk length
+        // Invalid negative bulk length
         let wrong_bulklen = &b"$-42\r\n"[..];
         let mut wrong_bulklen_cursor = Cursor::new(wrong_bulklen);
         let wrong_bulklen_result = Frame::check(&mut wrong_bulklen_cursor);
         assert!(matches!(wrong_bulklen_result, Err(Error::Other(_))));
         assert_eq!(wrong_bulklen_cursor.position(), 6);
 
-        // Test 16: Invalid bulk string
+        // Invalid bulk terminator
         let wrong_bulk = &b"$6\r\nfoobar\r3"[..];
         let mut wrong_bulk_cursor = Cursor::new(wrong_bulk);
         let wrong_bulk_result = Frame::check(&mut wrong_bulk_cursor);
         assert!(matches!(wrong_bulk_result, Err(Error::Other(_))));
         assert_eq!(wrong_bulk_cursor.position(), 12);
 
-        // Test 17: Invalid array size
-        let wrong_arraysize = &b"*-137\r\n"[..];
-        let mut wrong_arraysize_cursor = Cursor::new(wrong_arraysize);
-        let wrong_arraysize_result = Frame::check(&mut wrong_arraysize_cursor);
-        assert!(matches!(wrong_arraysize_result, Err(Error::Other(_))));
-        assert_eq!(wrong_arraysize_cursor.position(), 7);
-
-        // Test 18: Incomplete bulk terminator
+        // Incomplete bulk terminator
         let bulk_terminator = &b"$6\r\nfoobar\r"[..];
         let mut bulk_terminator_cursor = Cursor::new(bulk_terminator);
         let bulk_terminator_result = Frame::check(&mut bulk_terminator_cursor);
         assert!(matches!(bulk_terminator_result, Err(Error::Incomplete)));
         assert_eq!(bulk_terminator_cursor.position(), 4);
 
-        // Test 19: Bulk length at i64::MAX
+        // Bulk length at `i64::MAX`
         let i64max_length = &b"$9223372036854775807\r\n"[..];
         let mut i64max_length_cursor = Cursor::new(i64max_length);
         let i64max_length_result = Frame::check(&mut i64max_length_cursor);
@@ -620,8 +588,70 @@ mod tests {
     }
 
     #[test]
+    fn test_frame_check_array() {
+        // Ordinary array
+        let valid_array = &b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
+        let mut array_cursor = Cursor::new(valid_array);
+        let array_result = Frame::check(&mut array_cursor);
+        assert!(array_result.is_ok());
+        assert_eq!(array_cursor.position(), 22);
+
+        // Nested array
+        let valid_nestarray = &b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n"[..];
+        let mut nestarray_cursor = Cursor::new(valid_nestarray);
+        let nestarray_result = Frame::check(&mut nestarray_cursor);
+        assert!(nestarray_result.is_ok());
+        assert_eq!(nestarray_cursor.position(), 36);
+
+        // Empty array
+        let valid_emptyarray = &b"*0\r\n"[..];
+        let mut emptyarray_cursor = Cursor::new(valid_emptyarray);
+        let emptyarray_result = Frame::check(&mut emptyarray_cursor);
+        assert!(emptyarray_result.is_ok());
+        assert_eq!(emptyarray_cursor.position(), 4);
+
+        // Null array
+        let valid_nullarray = &b"*-1\r\n"[..];
+        let mut nullarray_cursor = Cursor::new(valid_nullarray);
+        let nullarray_result = Frame::check(&mut nullarray_cursor);
+        assert!(nullarray_result.is_ok());
+        assert_eq!(nullarray_cursor.position(), 5);
+
+        // Incomplete array
+        let cutoff_array = &b"*2\r\n$3\r\nfoo\r\n"[..];
+        let mut cutoff_cursor = Cursor::new(cutoff_array);
+        let cutoff_result = Frame::check(&mut cutoff_cursor);
+        assert!(matches!(cutoff_result, Err(Error::Incomplete)));
+        assert_eq!(cutoff_cursor.position(), 13);
+
+        // Invalid negative array length
+        let wrong_arraysize = &b"*-137\r\n"[..];
+        let mut wrong_arraysize_cursor = Cursor::new(wrong_arraysize);
+        let wrong_arraysize_result = Frame::check(&mut wrong_arraysize_cursor);
+        assert!(matches!(wrong_arraysize_result, Err(Error::Other(_))));
+        assert_eq!(wrong_arraysize_cursor.position(), 7);
+    }
+
+    #[test]
+    fn test_frame_check_input_errors() {
+        // Empty input
+        let empty_data = &b""[..];
+        let mut empty_cursor = Cursor::new(empty_data);
+        let empty_result = Frame::check(&mut empty_cursor);
+        assert!(matches!(empty_result, Err(Error::Incomplete)));
+        assert_eq!(empty_cursor.position(), 0);
+
+        // Unknown frame marker
+        let wrong_1stbyte = &b"&hello world\r\n"[..];
+        let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
+        let wrong_1stbyte_result = Frame::check(&mut wrong_1stbyte_cursor);
+        assert!(matches!(wrong_1stbyte_result, Err(Error::Other(_))));
+        assert_eq!(wrong_1stbyte_cursor.position(), 1);
+    }
+
+    #[test]
     fn test_frame_check_oversized_array() {
-        // Test 20: Oversized array header
+        // Array length at the exclusive limit
         let size = config::ARRAY_LENGTH_LIMIT_EXCLUSIVE;
         let oversized_array = format!("*{size}\r\n");
         let mut oversized_array_cursor = Cursor::new(oversized_array.as_bytes());
@@ -631,7 +661,7 @@ mod tests {
 
     #[test]
     fn test_frame_check_overnested_array() {
-        // Test 21: Array with too many nesting levels
+        // Array nesting beyond the supported depth
         let subframe = "*1\r\n".repeat(33);
         let overnested_array = format!("{subframe}:0\r\n");
         let mut overnested_array_cursor = Cursor::new(overnested_array.as_bytes());
@@ -640,8 +670,8 @@ mod tests {
     }
 
     #[test]
-    fn test_frame_parse() {
-        // Test 1: Valid simple string
+    fn test_frame_parse_line_frames() {
+        // Simple string
         let valid_simple = &b"+Hello, World!\r\n"[..];
         let mut simple_cursor = Cursor::new(valid_simple);
         let simple_frame = Frame::parse(&mut simple_cursor);
@@ -651,7 +681,7 @@ mod tests {
         );
         assert_eq!(simple_cursor.position(), 16);
 
-        // Test 2: Valid error
+        // Error frame
         let valid_error = &b"-Error 404 Not Found\r\n"[..];
         let mut error_cursor = Cursor::new(valid_error);
         let error_frame = Frame::parse(&mut error_cursor);
@@ -661,35 +691,59 @@ mod tests {
         );
         assert_eq!(error_cursor.position(), 22);
 
-        // Test 3: Valid integer
+        // Integer frame
         let valid_integer = &b":42\r\n"[..];
         let mut integer_cursor = Cursor::new(valid_integer);
         let integer_frame = Frame::parse(&mut integer_cursor);
         assert_eq!(integer_frame.unwrap(), Frame::Integer(42i64));
         assert_eq!(integer_cursor.position(), 5);
 
-        // Test 4: Valid bulk string
+        // Nonnumeric integer contents
+        let non_num_int = &b":abc\r\n"[..];
+        let mut non_num_int_cursor = Cursor::new(non_num_int);
+        let non_num_int_frame = Frame::parse(&mut non_num_int_cursor);
+        assert!(matches!(non_num_int_frame, Err(Error::Other(_))));
+    }
+
+    #[test]
+    fn test_frame_parse_bulk() {
+        // Bulk string
         let valid_bulk = &b"$6\r\nfoobar\r\n"[..];
         let mut bulk_cursor = Cursor::new(valid_bulk);
         let bulk_frame = Frame::parse(&mut bulk_cursor);
         assert_eq!(bulk_frame.unwrap(), Frame::Bulk("foobar".as_bytes().into()));
         assert_eq!(bulk_cursor.position(), 12);
 
-        // Test 5: Valid empty bulk string
+        // Empty bulk string
         let valid_emptybulk = &b"$0\r\n\r\n"[..];
         let mut emptybulk_cursor = Cursor::new(valid_emptybulk);
         let emptybulk_frame = Frame::parse(&mut emptybulk_cursor);
         assert_eq!(emptybulk_frame.unwrap(), Frame::Bulk("".as_bytes().into()));
         assert_eq!(emptybulk_cursor.position(), 6);
 
-        // Test 6: Valid null bulk string
+        // Null bulk string
         let valid_nullbulk = &b"$-1\r\n"[..];
         let mut nullbulk_cursor = Cursor::new(valid_nullbulk);
         let nullbulk_frame = Frame::parse(&mut nullbulk_cursor);
         assert_eq!(nullbulk_frame.unwrap(), Frame::Null);
         assert_eq!(nullbulk_cursor.position(), 5);
 
-        // Test 7: Valid array
+        // Incomplete bulk payload
+        let truncated_bulk = &b"$6\r\nfoo"[..];
+        let mut truncated_bulk_cursor = Cursor::new(truncated_bulk);
+        let truncated_bulk_frame = Frame::parse(&mut truncated_bulk_cursor);
+        assert!(matches!(truncated_bulk_frame, Err(Error::Incomplete)));
+
+        // Invalid bulk terminator
+        let wrong_end_bulk = &b"$6\r\nfoobar@@"[..];
+        let mut wrong_end_bulk_cursor = Cursor::new(wrong_end_bulk);
+        let wrong_end_bulk_frame = Frame::parse(&mut wrong_end_bulk_cursor);
+        assert!(matches!(wrong_end_bulk_frame, Err(Error::Other(_))));
+    }
+
+    #[test]
+    fn test_frame_parse_array() {
+        // Ordinary array
         let valid_array = &b"*2\r\n$3\r\nfoo\r\n$3\r\nbar\r\n"[..];
         let mut array_cursor = Cursor::new(valid_array);
         let array_frame = Frame::parse(&mut array_cursor);
@@ -702,7 +756,7 @@ mod tests {
         );
         assert_eq!(array_cursor.position(), 22);
 
-        // Test 8: Valid nested array
+        // Nested array
         let valid_nestarray = &b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n"[..];
         let mut nestarray_cursor = Cursor::new(valid_nestarray);
         let nestarray_frame = Frame::parse(&mut nestarray_cursor);
@@ -722,56 +776,41 @@ mod tests {
         );
         assert_eq!(nestarray_cursor.position(), 36);
 
-        // Test 9: Valid empty array
+        // Empty array
         let valid_emptyarray = &b"*0\r\n"[..];
         let mut emptyarray_cursor = Cursor::new(valid_emptyarray);
         let emptyarray_frame = Frame::parse(&mut emptyarray_cursor);
         assert_eq!(emptyarray_frame.unwrap(), Frame::Array(vec![]));
         assert_eq!(emptyarray_cursor.position(), 4);
 
-        // Test 10: Valid null array
+        // Null array
         let valid_nullarray = &b"*-1\r\n"[..];
         let mut nullarray_cursor = Cursor::new(valid_nullarray);
         let nullarray_frame = Frame::parse(&mut nullarray_cursor);
         assert_eq!(nullarray_frame.unwrap(), Frame::Null);
         assert_eq!(nullarray_cursor.position(), 5);
+    }
 
-        // Test 11: Invalid first byte
+    #[test]
+    fn test_frame_parse_input_errors() {
+        // Unknown frame marker
         let wrong_1stbyte = &b"&hello world\r\n"[..];
         let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
         let wrong_1stbyte_frame = Frame::parse(&mut wrong_1stbyte_cursor);
         assert!(matches!(wrong_1stbyte_frame, Err(Error::Other(_))));
-        // get_u8() advances cursor by 1
+        // Reading the frame marker advances the cursor by one byte.
         assert_eq!(wrong_1stbyte_cursor.position(), 1);
 
-        // Test 12: Empty input
+        // Empty input
         let empty_input = &b""[..];
         let mut empty_input_cursor = Cursor::new(empty_input);
         let empty_input_frame = Frame::parse(&mut empty_input_cursor);
         assert!(matches!(empty_input_frame, Err(Error::Incomplete)));
-
-        // Test 13: Truncated bulk frame
-        let truncated_bulk = &b"$6\r\nfoo"[..];
-        let mut truncated_bulk_cursor = Cursor::new(truncated_bulk);
-        let truncated_bulk_frame = Frame::parse(&mut truncated_bulk_cursor);
-        assert!(matches!(truncated_bulk_frame, Err(Error::Incomplete)));
-
-        // Test 14: Invalid bulk frame with wrong ending
-        let wrong_end_bulk = &b"$6\r\nfoobar@@"[..];
-        let mut wrong_end_bulk_cursor = Cursor::new(wrong_end_bulk);
-        let wrong_end_bulk_frame = Frame::parse(&mut wrong_end_bulk_cursor);
-        assert!(matches!(wrong_end_bulk_frame, Err(Error::Other(_))));
-
-        // Test 15: Invalid integer frame
-        let non_num_int = &b":abc\r\n"[..];
-        let mut non_num_int_cursor = Cursor::new(non_num_int);
-        let non_num_int_frame = Frame::parse(&mut non_num_int_cursor);
-        assert!(matches!(non_num_int_frame, Err(Error::Other(_))));
     }
 
     #[test]
     fn test_frame_parse_nonzero_cursor() {
-        // Test 16: Nonzero cursor position
+        // Parse the second frame, leaving the third frame unread.
         let long_inputs = "$3\r\nSET\r\n$5\r\nAlpha\r\n$3\r\n137\r\n";
         let mut long_inputs_cursor = Cursor::new(long_inputs.as_bytes());
         long_inputs_cursor.set_position(9);
@@ -785,8 +824,7 @@ mod tests {
 
     #[test]
     fn test_frame_parse_maxsized_array() {
-        // Test 17: Array at the maximum supported count
-
+        // Array at the maximum supported length
         let size = usize::try_from(config::ARRAY_LENGTH_LIMIT_EXCLUSIVE - 1).unwrap();
         let subframe = ":0\r\n".repeat(size);
         let maxsized_array = format!("*{size}\r\n{subframe}");
@@ -794,10 +832,10 @@ mod tests {
         let maxsized_array_result = Frame::parse(&mut maxsized_array_cursor);
         assert_eq!(
             maxsized_array_result.unwrap(),
-            // We do this in order not to derive the Clone trait to `Frame`
+            // Build the expected elements without requiring `Frame: Clone`.
             Frame::Array((0..size).map(|_| Frame::Integer(0)).collect())
         );
-        // the calculation below is the number of digits for `size`
+        // Count the array header and all encoded child frames.
         let position = u64::try_from(
             1 + usize::try_from(size.checked_ilog10().unwrap_or(0) + 1).unwrap() + 4 * size + 2,
         )
@@ -807,13 +845,13 @@ mod tests {
 
     #[test]
     fn test_frame_parse_maxnested_array() {
-        // Test 18: Array at the maximum supported nesting depth
+        // Array at the maximum supported nesting depth
         let level = usize::try_from(config::MAX_ARRAY_DEPTH).unwrap();
         let subframe = "*1\r\n".repeat(level);
         let maxnested_array = format!("{subframe}:0\r\n");
         let mut maxnested_array_cursor = Cursor::new(maxnested_array.as_bytes());
         let maxnested_array_result = Frame::parse(&mut maxnested_array_cursor);
-        // The nested array to compare. We build it in-N-out
+        // Build the expected array from the innermost value outward.
         let mut expected = Frame::Integer(0);
         for _ in 0..level {
             expected = Frame::Array(vec![expected]);

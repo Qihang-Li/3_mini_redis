@@ -23,10 +23,12 @@ pub struct Parse {
 }
 
 impl Parse {
-    /// Creates a new Parse object using a `Frame`
+    /// Creates an argument parser from an array frame.
+    ///
+    /// Takes ownership of the array elements without validating a command.
     ///
     /// # Errors
-    /// Returns `Error::Other` if the frame is not an `Frame::Array`.
+    /// Returns `Error::Other` if the input is not a `Frame::Array`.
     pub fn from_frame(frame: Frame) -> Result<Parse, Error> {
         match frame {
             Frame::Array(vec) => Ok(Self {
@@ -38,11 +40,15 @@ impl Parse {
         }
     }
 
-    /// Extracts the next byte if available.
+    /// Consumes the next argument and returns its contents as `Bytes`.
+    ///
+    /// Accepts a bulk or simple string. An argument with an unsupported frame
+    /// type is also consumed before the error is returned.
     ///
     /// # Errors
-    /// Returns `Error::EndOfStream` if there is no next frame
-    /// Returns `Error::Other` if the frame is not a simple or bulk string.
+    /// Returns `Error::EndOfStream` if no argument remains.
+    /// Returns `Error::Other` if the next argument is not a bulk or simple
+    /// string.
     pub fn next_bytes(&mut self) -> Result<Bytes, Error> {
         let Some(frame) = self.parts.next() else {
             return Err(Error::EndOfStream);
@@ -56,10 +62,15 @@ impl Parse {
         }
     }
 
-    /// Extracts the next byte and convert to string if available.
+    /// Consumes the next argument and returns its contents as a `String`.
+    ///
+    /// Accepts a bulk or simple string containing valid UTF-8. If an argument
+    /// is present, it is consumed even when its type or encoding is rejected.
     ///
     /// # Errors
-    /// Returns `Error::Other` if the contents are not UTF-8 compatible.
+    /// Returns `Error::EndOfStream` if no argument remains.
+    /// Returns `Error::Other` if the next argument is not a bulk or simple
+    /// string, or if its contents are not valid UTF-8.
     pub fn next_string(&mut self) -> Result<String, Error> {
         let bytes = self.next_bytes()?;
         let result = String::from_utf8(bytes.to_vec())
@@ -67,10 +78,13 @@ impl Parse {
         Ok(result)
     }
 
-    /// Determines if the iterator is exhausted.
+    /// Checks that no arguments remain.
+    ///
+    /// Returns `Ok(())` when the iterator is exhausted. Otherwise, consumes
+    /// one unexpected argument and returns an error.
     ///
     /// # Errors
-    /// Returns `Error::Other` if any element remains in the iterator.
+    /// Returns `Error::Other` if an argument remains.
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.parts.next().is_some() {
             return Err(Error::Other("Wrong message: Redundant arguments"));
@@ -81,7 +95,7 @@ impl Parse {
 
 #[cfg(test)]
 impl Parse {
-    /// constructor for test only
+    /// Creates an argument parser from frames for use in tests.
     pub(crate) fn new_test(frames: Vec<Frame>) -> Self {
         Self {
             parts: frames.into_iter(),
@@ -95,7 +109,7 @@ mod tests {
 
     #[test]
     fn test_parse_new() {
-        // Test 1: Valid command
+        // Array input
         let valid_frame = Frame::Array(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Bulk(Bytes::from("42")),
@@ -103,7 +117,7 @@ mod tests {
         let valid_command = Parse::from_frame(valid_frame);
         assert!(valid_command.is_ok());
 
-        // Test 2: Invalid command, not as an array
+        // Non-array input
         let invalid_frame = Frame::Null;
         let invalid_command = Parse::from_frame(invalid_frame);
         assert!(matches!(invalid_command, Err(Error::Other(_))));
@@ -121,19 +135,19 @@ mod tests {
         ]);
         let mut command = Parse::from_frame(frame).unwrap();
 
-        // Test 1: Valid byte, as a bulk string
+        // Bulk-string argument
         let valid_bulk_byte = command.next_bytes();
         assert_eq!(valid_bulk_byte, Ok(Bytes::from("Hello, ")));
 
-        // Test 2: Valid byte, as a simple string
+        // Simple-string argument
         let valid_simple_byte = command.next_bytes();
         assert_eq!(valid_simple_byte, Ok(Bytes::from("World!")));
 
-        // Test 3: Invalid byte, not as a string
+        // Unsupported argument type
         let invalid_byte = command.next_bytes();
         assert!(matches!(invalid_byte, Err(Error::Other(_))));
 
-        // Test 4: Empty
+        // Exhausted argument iterator
         let empty_byte = command.next_bytes();
         assert_eq!(empty_byte, Err(Error::EndOfStream));
     }
@@ -147,20 +161,19 @@ mod tests {
         ]);
         let mut command = Parse::from_frame(frame).unwrap();
 
-        // Test 1: Valid string, as a bulk string
+        // UTF-8 contents in a bulk string
         let valid_bulk_string = command.next_string();
         assert_eq!(valid_bulk_string, Ok(String::from("Hello, ")));
 
-        // Test 2: Valid string, as a simple string
+        // Contents of a simple string
         let valid_simple_string = command.next_string();
         assert_eq!(valid_simple_string, Ok(String::from("Tokio!")));
 
-        // Test 3: Invalid string, not UFT-8 compatible
+        // Invalid UTF-8 contents
         let invalid_string = command.next_string();
         assert!(matches!(invalid_string, Err(Error::Other(_))));
 
-        // No test 4: No invalid byte or empty vector,
-        // since they are verified by test_parse_next_bytes()
+        // Exhausted argument iterator
         let empty_string = command.next_string();
         assert_eq!(empty_string, Err(Error::EndOfStream));
     }
@@ -169,11 +182,11 @@ mod tests {
     fn test_parse_finish() {
         let mut parse = Parse::from_frame(Frame::Array(vec![Frame::Null])).unwrap();
 
-        // Test 1: Uncleared iterator
+        // Unexpected remaining argument
         let error_result = parse.finish();
         assert!(matches!(error_result, Err(Error::Other(_))));
 
-        // Test 2: Exhausted iterator
+        // Exhausted iterator
         let _ = parse.parts.next();
         let result = parse.finish();
         assert!(result.is_ok());

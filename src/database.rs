@@ -15,22 +15,26 @@ impl Database {
         }
     }
 
-    /// Retrieves a value from the database.
+    /// Retrieves the value associated with `key`.
+    ///
+    /// Returns `Some` containing a clone of the stored `Bytes`, or `None` if
+    /// the key is absent. The clone shares the underlying byte storage.
     ///
     /// # Panics
-    /// Panics if the internal database lock is poisoned by a crashed thread.
+    /// Panics if the database mutex is poisoned, typically after a thread
+    /// panics while holding the lock.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Bytes> {
-        // Here we use a slice for key to optimize performance
         let data = self.rows.lock().unwrap();
+        // Use the borrowed `key` without constructing an owned `String`.
         data.get(key).cloned()
     }
 
-    /// Inserts a key-value pair into the database as an entry,
-    /// overwriting the existing value if any.
+    /// Inserts a key-value pair, replacing any existing value for the key.
     ///
     /// # Panics
-    /// Panics if the internal database lock is poisoned by a crashed thread.
+    /// Panics if the database mutex is poisoned, typically after a thread
+    /// panics while holding the lock.
     pub fn set(&self, key: String, value: Bytes) {
         let mut data = self.rows.lock().unwrap();
         data.insert(key, value);
@@ -38,7 +42,7 @@ impl Database {
 }
 
 #[cfg(test)]
-mod test {
+mod tests {
     use super::*;
     use bytes::Bytes;
 
@@ -60,11 +64,11 @@ mod test {
                 .insert(String::from("Answer"), Bytes::from("42"));
         }
 
-        // Test 1: get with a valid key
+        // Retrieve an existing value
         let valid_value = test_db.get("Answer").unwrap();
         assert_eq!(valid_value, Bytes::from("42"));
 
-        // Test 2: get with an invalid key
+        // Look up a missing key
         let invalid_value = test_db.get("Solution");
         assert_eq!(invalid_value, None);
     }
@@ -80,16 +84,16 @@ mod test {
                 .insert(String::from("Answer"), Bytes::from("42"));
         }
 
-        // Test 1: set to overwrite an entry
+        // Overwrite an existing entry
         test_db.set(String::from("Answer"), Bytes::from("Forty-two"));
-        // Scope block strictly isolates the lock for reading
+        // Release this lock before the next call to `set`.
         {
             let guard = test_db.rows.lock().unwrap();
             let overwrite_value = guard.get("Answer").unwrap();
             assert_eq!(*overwrite_value, Bytes::from("Forty-two"));
-        } // guard is dropped here, unlocking the Mutex
+        } // Dropping `guard` releases the mutex.
 
-        // Test 2: set to add an entry
+        // Add a new entry
         test_db.set(String::from("Alpha"), Bytes::from("137"));
         {
             let guard = test_db.rows.lock().unwrap();

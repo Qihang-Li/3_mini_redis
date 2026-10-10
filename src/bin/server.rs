@@ -12,38 +12,39 @@ use tracing_subscriber::FmtSubscriber;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
-    // Step 0: transplant the observability pipeline for debugging.
-    // 0.1 construct a subscriber that prints formatted traces to standard output.
+    // Step 0: Configure application logging
+    // Step 0.1: Build a subscriber for formatted log output
     let subscriber = FmtSubscriber::builder()
-        // Defines the max log level to record (TRACE, DEBUG, INFO, WARN, ERROR)
+        // Include events up to the configured maximum verbosity.
         .with_max_level(config::DEFAULT_LOG_LEVEL)
-        // Completes the builder and returns the subscriber
+        // Finish configuring the subscriber.
         .finish();
 
-    // 0.2 set the subscriber as the global default for this application.
+    // Step 0.2: Install the application's global tracing subscriber
     tracing::subscriber::set_global_default(subscriber)
-        // Fail information
+        // Require logging setup to succeed before starting the server.
         .expect("Failed to set tracing subscriber");
 
-    // 0.3 emit a test log to verify initialization.
+    // Step 0.3: Log the startup message
     info!("Mini-Redis Server Daemon initializing...");
 
-    // Step 1: initialize with resource allocation.
-    // 1.1 allocate the central memory state.
+    // Step 1: Initialize the shared server resources
+    // Step 1.1: Create the shared database
     let db = Database::new();
 
-    // 1.2 allocate the global synchronization channels.
-    // The broadcast channel requires a capacity limit.
+    // Step 1.2: Create shutdown signaling and completion tracking
+    // Broadcast capacity bounds the number of retained messages.
     let (broadcast_tx, _broadcast_rx) =
         broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
-    // The mpsc channel acts as the shutdown latch (capacity 1 is sufficient)
+    // Use sender lifetimes to track shutdown; no values are sent.
+    // Capacity 1 is sufficient for this use.
     let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<()>(1);
 
-    // 1.3 bind the TCP socket to the designated port.
+    // Step 1.3: Bind the listener to the configured address
     let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
     info!("Server listening on {}", config::DEFAULT_SERVER_BIND_ADDR);
 
-    // 1.4 prepare an instance of acceptor
+    // Step 1.4: Create shared metrics and configure the acceptor
     let metrics = Arc::new(Metrics::new());
     let mut acceptor = Acceptor::new(
         listener,
@@ -55,26 +56,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&metrics),
     );
 
-    // Step 2: Uses `tokio::select!` to race the main thread and shutdown signal
+    // Step 2: Wait for the accept loop or Ctrl+C listener to finish
+    // The unselected future is dropped when a branch is selected.
     tokio::select! {
-        // Below is the main business logic
+        // Accept loop completed; its result is ignored
         _ = acceptor.run() => {
             tracing::info!("Task succesfully spawned for incoming Redis client");
         },
+        // Ctrl+C received or signal-listener error
         _ = signal::ctrl_c() => {
             tracing::info!("Shutdown signal received from OS");
         }
     };
 
-    // Step 3: clean everything after shutdown signal before killing main thread.
-    // 3.1 broadcast a signal to every spawned task (as shutdown).
+    // Step 3: Request shutdown and wait for sender cleanup
+    // Step 3.1: Notify the subscribed handlers of shutdown
     let _ = broadcast_tx.send(());
-    // 3.2 suspend the main thread until the channel closes,
-    // which only occurs when the internal Sender count reaches 0.
+    // Step 3.2: Release resources owned outside the connection tasks
+    // Drop the listener and the acceptor's channel sender clones.
     drop(acceptor);
     drop(mpsc_tx);
+    // Step 3.3: Wait for connection-task senders to be dropped
+    // No values are sent, so `recv()` returns `None` when all senders are gone.
+    // Awaiting this closure suspends the main future while it is pending.
+    // There is no timeout on this wait.
     mpsc_rx.recv().await;
-    // 3.3 close the main thread.
+    // Step 3.4: Log the shutdown status and final metrics
     tracing::info!("All tasks are safely shut down.");
     info!(
         active_connections = metrics.active_connections(),
