@@ -12,8 +12,8 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::Incomplete => write!(f, "stream ended early"),
-            Error::Other(err) => write!(f, "{err}"),
+            Error::Incomplete => write!(f, "Incomplete frame"),
+            Error::Other(message) => write!(f, "{message}"),
         }
     }
 }
@@ -41,16 +41,14 @@ impl Frame {
     /// or an exceeded array length or nesting limit.
     /// The cursor position after an error is unspecified.
     pub fn check(src: &mut Cursor<&[u8]>) -> Result<(), Error> {
-        let depth = 0;
-        Self::check_w_depth(src, depth)?;
-        Ok(())
+        Self::check_with_depth(src, 0)
     }
 
     /// Checks one frame while tracking the number of enclosing arrays.
     ///
     /// A top-level frame starts at depth zero. Each array checks its children
     /// at the next depth.
-    fn check_w_depth(src: &mut Cursor<&[u8]>, depth: i32) -> Result<(), Error> {
+    fn check_with_depth(src: &mut Cursor<&[u8]>, depth: i32) -> Result<(), Error> {
         // Step 1: Check that input remains at the cursor
         if !src.has_remaining() {
             // A missing frame or array element requires more input.
@@ -77,34 +75,30 @@ impl Frame {
                         // Null bulk string
                         Ok(())
                     }
-                    l if l >= 0 => {
+                    length if length >= 0 => {
                         let length_usize = usize::try_from(length)
-                            .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                            .map_err(|_| Error::Other("Bulk string length overflow"))?;
                         // Include the two-byte CRLF terminator.
                         let length_required = length_usize
                             .checked_add(2)
-                            .ok_or(Error::Other("Wrong message: Length overflow"))?;
+                            .ok_or(Error::Other("Bulk string length overflow"))?;
                         // Require the full payload and its terminator.
                         if src.remaining() >= length_required {
                             // Skip the payload, then validate CRLF.
                             src.advance(length_usize);
-                            if src.get_u8() == 13 && src.get_u8() == 10 {
+                            if src.get_u8() == b'\r' && src.get_u8() == b'\n' {
                                 // The payload and terminator are complete.
                                 return Ok(());
                             }
                             // The payload is complete, but CRLF is invalid.
-                            return Err(Error::Other(
-                                "Wrong message: Invalid ending for bulk string",
-                            ));
+                            return Err(Error::Other("Invalid bulk string terminator"));
                         }
                         // The payload or its terminator is incomplete.
                         Err(Error::Incomplete)
                     }
                     _ => {
                         // Negative lengths other than `-1` are invalid.
-                        Err(Error::Other(
-                            "Wrong message: Invalid length for bulk string",
-                        ))
+                        Err(Error::Other("Invalid bulk string length"))
                     }
                 }
             }
@@ -113,36 +107,38 @@ impl Frame {
             b'*' => {
                 // Reject an array that would exceed the nesting limit.
                 if depth >= config::MAX_ARRAY_DEPTH {
-                    return Err(Error::Other("Wrong message: Too many nested levels"));
+                    return Err(Error::Other(
+                        "Array nesting depth exceeds the supported limit",
+                    ));
                 }
                 // Read the declared number of elements.
-                let size = Frame::get_decimal(src)?;
+                let array_length = Frame::get_decimal(src)?;
                 // Handle null, empty, and nonempty arrays.
-                match size {
+                match array_length {
                     -1..=0 => {
                         // Null or empty array
                         Ok(())
                     }
                     1..config::ARRAY_LENGTH_LIMIT_EXCLUSIVE => {
                         // Check each child at the next nesting depth.
-                        for _ in 0..size {
+                        for _ in 0..array_length {
                             // If no bytes remain, this call returns
                             // `Error::Incomplete`.
-                            Self::check_w_depth(src, depth + 1)?;
+                            Self::check_with_depth(src, depth + 1)?;
                         }
                         Ok(())
                     }
                     _ => {
                         // Reject lengths below `-1` or at or above the
                         // configured exclusive limit.
-                        Err(Error::Other("Wrong message: Invalid size for array"))
+                        Err(Error::Other("Array length is outside the supported range"))
                     }
                 }
             }
 
             _ => {
                 // Supported markers are `+`, `-`, `:`, `$`, and `*`.
-                Err(Error::Other("Wrong message: Invalid first byte"))
+                Err(Error::Other("Invalid frame type marker"))
             }
         }
     }
@@ -158,16 +154,13 @@ impl Frame {
     /// Returns `Error::Other` for invalid input or exceeded resource limits.
     /// The cursor position after an error is unspecified.
     pub fn parse(src: &mut Cursor<&[u8]>) -> Result<Frame, Error> {
-        let cursor_position = src.position();
+        let start_position = src.position();
 
-        match Self::check(src) {
-            Ok(()) => {
-                // Rewind to decode the frame from its original start.
-                src.set_position(cursor_position);
-                Self::parse_data(src)
-            }
-            Err(e) => Err(e),
-        }
+        Self::check(src)?;
+
+        // Rewind to decode the frame from its original start.
+        src.set_position(start_position);
+        Self::parse_data(src)
     }
 
     /// Decodes one frame whose structure has already been checked.
@@ -187,20 +180,20 @@ impl Frame {
             b'+' | b'-' => {
                 let content = Frame::get_line(src)?;
                 // Copy the contents into an owned UTF-8 string.
-                let result = String::from_utf8(content.to_vec())
-                    .map_err(|_| Error::Other("Wrong message: Invalid UTF-8"))?;
+                let string = String::from_utf8(content.to_vec())
+                    .map_err(|_| Error::Other("Invalid UTF-8"))?;
                 // Select the variant after validating UTF-8.
                 if first_byte == b'+' {
-                    Ok(Frame::Simple(result))
+                    Ok(Frame::Simple(string))
                 } else {
-                    Ok(Frame::Error(result))
+                    Ok(Frame::Error(string))
                 }
             }
 
             // Integer frame
             b':' => {
-                let result = Frame::get_decimal(src)?;
-                Ok(Frame::Integer(result))
+                let number = Frame::get_decimal(src)?;
+                Ok(Frame::Integer(number))
             }
 
             // Bulk string
@@ -212,36 +205,36 @@ impl Frame {
                     return Ok(Frame::Null);
                 }
                 let length_usize = usize::try_from(length)
-                    .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+                    .map_err(|_| Error::Other("Bulk string length overflow"))?;
                 // Copy the payload into an owned `Bytes` value.
-                let result = Bytes::copy_from_slice(&src.chunk()[..length_usize]);
+                let bytes = Bytes::copy_from_slice(&src.chunk()[..length_usize]);
                 // Skip the payload and its already-checked CRLF terminator.
                 src.advance(length_usize + 2);
-                Ok(Frame::Bulk(result))
+                Ok(Frame::Bulk(bytes))
             }
 
             // Array
             b'*' => {
                 // Read the declared number of elements.
-                let size = Frame::get_decimal(src)?;
+                let array_length = Frame::get_decimal(src)?;
                 // A null array has no elements.
-                if size == -1 {
+                if array_length == -1 {
                     return Ok(Frame::Null);
                 }
                 // Decode children already covered by the structural check.
-                let mut result = Vec::with_capacity(
-                    usize::try_from(size)
-                        .map_err(|_| Error::Other("Wrong message: Length overflow"))?,
+                let mut elements = Vec::with_capacity(
+                    usize::try_from(array_length)
+                        .map_err(|_| Error::Other("Array length overflow"))?,
                 );
-                for _ in 0..size {
-                    result.push(Frame::parse_data(src)?);
+                for _ in 0..array_length {
+                    elements.push(Frame::parse_data(src)?);
                 }
-                Ok(Frame::Array(result))
+                Ok(Frame::Array(elements))
             }
 
             _ => {
                 // Successful structural checking excludes this branch.
-                Err(Error::Other("Wrong message: Invalid first byte"))
+                Err(Error::Other("Invalid frame type marker"))
             }
         }
     }
@@ -259,29 +252,33 @@ impl Frame {
     fn get_line<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], Error> {
         // Step 1: Borrow the unread bytes and record the cursor position
         let line = src.chunk();
-        let pos = usize::try_from(src.position())
-            .map_err(|_| Error::Other("Wrong message: Length overflow"))?;
+        let start_position = usize::try_from(src.position())
+            .map_err(|_| Error::Other("Cursor position cannot be represented as usize"))?;
 
         // Step 2: Scan for a carriage return
         for index in 0..line.len() {
-            if line[index] == 13 {
-                // A carriage return needs a following byte.
-                if index + 1 < line.len() {
-                    // Step 3: Check for the following line feed
-                    if line[index + 1] == 10 {
-                        // A complete line may be followed by more input.
-                        // Keep the returned slice tied to the input's lifetime.
-                        let result = &src.get_ref()[pos..pos + index];
-                        // Advance past CRLF without removing input bytes.
-                        src.advance(index + 2);
-                        return Ok(result);
-                    }
-                    // A different byte after the carriage return is malformed.
-                    return Err(Error::Other("Wrong message: '\r' not followed by '\n'"));
-                }
+            if line[index] != b'\r' {
+                continue;
+            }
+
+            // A carriage return needs a following byte.
+            if index + 1 >= line.len() {
                 // The input ends immediately after `\r`.
                 return Err(Error::Incomplete);
             }
+
+            // Step 3: Check for the following line feed
+            if line[index + 1] != b'\n' {
+                // A different byte after the carriage return is malformed.
+                return Err(Error::Other("Carriage return is not followed by line feed"));
+            }
+
+            // A complete line may be followed by more input.
+            // Keep the returned slice tied to the input's lifetime.
+            let result = &src.get_ref()[start_position..start_position + index];
+            // Advance past CRLF without removing input bytes.
+            src.advance(index + 2);
+            return Ok(result);
         }
         // No carriage return was found in the available input.
         Err(Error::Incomplete)
@@ -303,25 +300,25 @@ impl Frame {
 
         // Step 2: Reject an empty line and initialize the accumulator
         if !line.has_remaining() {
-            return Err(Error::Other("Wrong message: Empty line"));
+            return Err(Error::Other("Empty decimal field"));
         }
-        let mut is_pos = 1i64;
+        let mut sign = 1i64;
         let mut result = 0i64;
 
         // Step 3: Read an optional minus sign or the first digit
         let first_byte = line.get_u8();
         match first_byte {
             // ASCII `'-'`
-            45 => is_pos = -1,
+            b'-' => sign = -1,
             // ASCII digits `'0'` through `'9'`
-            48..=57 => result = i64::from(first_byte - 48),
+            b'0'..=b'9' => result = i64::from(first_byte - b'0'),
             _ => {
-                return Err(Error::Other("Wrong message: Not a number"));
+                return Err(Error::Other("Invalid decimal integer"));
             }
         }
-        if !line.has_remaining() && (is_pos == -1) {
+        if !line.has_remaining() && (sign == -1) {
             // A minus sign must be followed by at least one digit.
-            return Err(Error::Other("Wrong message: Not a number"));
+            return Err(Error::Other("Invalid decimal integer"));
         }
 
         // Step 4: Accumulate the remaining digits with checked arithmetic
@@ -329,16 +326,16 @@ impl Frame {
         while line.has_remaining() {
             result = result
                 .checked_mul(10)
-                .ok_or(Error::Other("Wrong message: Integer overflow"))?;
+                .ok_or(Error::Other("Integer overflow"))?;
             let byte = line.get_u8();
             match byte {
-                48..=57 => {
+                b'0'..=b'9' => {
                     result = result
-                        .checked_add(is_pos * i64::from(byte - 48))
-                        .ok_or(Error::Other("Wrong message: Integer overflow"))?;
+                        .checked_add(sign * i64::from(byte - b'0'))
+                        .ok_or(Error::Other("Integer overflow"))?;
                 }
                 _ => {
-                    return Err(Error::Other("Wrong message: Not a number"));
+                    return Err(Error::Other("Invalid decimal integer"));
                 }
             }
         }
@@ -483,11 +480,11 @@ mod tests {
         assert_eq!(i64min_cursor.position(), 22);
 
         // One below `i64::MIN`
-        let i64min_p1 = &b"-9223372036854775809\r\n"[..];
-        let mut i64min_p1_cursor = Cursor::new(i64min_p1);
-        let i64min_p1_int = Frame::get_decimal(&mut i64min_p1_cursor);
-        assert!(matches!(i64min_p1_int, Err(Error::Other(_))));
-        assert_eq!(i64min_p1_cursor.position(), 22);
+        let i64min_m1 = &b"-9223372036854775809\r\n"[..];
+        let mut i64min_m1_cursor = Cursor::new(i64min_m1);
+        let i64min_m1_int = Frame::get_decimal(&mut i64min_m1_cursor);
+        assert!(matches!(i64min_m1_int, Err(Error::Other(_))));
+        assert_eq!(i64min_m1_cursor.position(), 22);
 
         // Multiplication overflow (`i64::MAX * 10`)
         let i64max_x10 = &b"92233720368547758070\r\n"[..];
@@ -583,7 +580,7 @@ mod tests {
         #[cfg(target_pointer_width = "32")]
         assert!(matches!(
             i64max_length_result,
-            Err(Error::Other("Wrong message: Length overflow"))
+            Err(Error::Other("Bulk string length overflow"))
         ));
     }
 

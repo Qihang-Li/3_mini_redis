@@ -27,20 +27,18 @@ async fn main() -> Result<(), Box<dyn Error + Send + Sync>> {
     let cli = Cli::parse();
 
     // Step 2: Parse the socket address and connect to the server
-    let socket_addr: SocketAddr = cli.addr.parse().expect("Invalid socket address format");
-    let mut requester = Requester::connect(socket_addr, config::DEFAULT_CLIENT_IO_TIMEOUT).await?;
+    let server_addr: SocketAddr = cli.addr.parse().expect("Invalid socket address format");
+    let mut requester = Requester::connect(server_addr, config::DEFAULT_CLIENT_IO_TIMEOUT).await?;
 
     // Step 3: Execute the selected command
     match cli.command {
         // GET command
-        CliCommand::Get { key } => {
-            match requester.get(&key).await? {
-                // Print the returned bytes using debug formatting.
-                Some(frame) => println!("{frame:?}"),
-                // Display a missing key as `(nil)`.
-                None => println!("(nil)"),
-            }
-        }
+        CliCommand::Get { key } => match requester.get(&key).await? {
+            // Print the returned bytes using debug formatting.
+            Some(value) => println!("{value:?}"),
+            // Display a missing key as `(nil)`.
+            None => println!("(nil)"),
+        },
         // SET command
         CliCommand::Set { key, value } => {
             // Send the value as UTF-8 bytes.

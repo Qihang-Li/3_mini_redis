@@ -38,15 +38,14 @@ impl Connection {
     pub async fn read_frame(&mut self) -> Result<Option<Frame>, Box<dyn Error + Send + Sync>> {
         loop {
             // Step 1: Try to parse a frame from the buffered bytes
-            let parse_result = self.parse_frame()?;
-            if let Some(frame) = parse_result {
+            if let Some(frame) = self.parse_frame()? {
                 // Return one frame, leaving any later bytes buffered.
                 return Ok(Some(frame));
             }
 
             // Step 2: Reject incomplete input that exhausts the byte budget
             if self.buffer.len() >= config::MAX_BUFFERED_BYTES {
-                return Err("Frame cannot fit within the buffer limit.".into());
+                return Err("Frame cannot fit within the buffer limit".into());
             }
 
             // Step 3: Limit the next read to the remaining byte budget
@@ -61,7 +60,7 @@ impl Connection {
                     return Ok(None);
                 }
                 // EOF with an incomplete frame
-                return Err("Network Error! Failed to fetch network data.".into());
+                return Err("Connection reached EOF with an incomplete frame".into());
             }
             // Retry parsing with the newly buffered bytes.
         }
@@ -91,7 +90,7 @@ impl Connection {
             // Incomplete frame
             Err(crate::frame::Error::Incomplete) => Ok(None),
             // Invalid input or exceeded parsing limit
-            Err(e) => Err(e.into()),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -157,20 +156,20 @@ impl Connection {
                 // Step 5: Write the payload's CRLF terminator
                 self.stream.write_all(b"\r\n").await?;
             }
-            Frame::Array(vec) => {
+            Frame::Array(elements) => {
                 // Step 1: Write the frame marker
                 self.stream.write_u8(b'*').await?;
                 // Step 2: Write the element count
                 self.stream
-                    .write_all(vec.len().to_string().as_bytes())
+                    .write_all(elements.len().to_string().as_bytes())
                     .await?;
                 // Step 3: Write the CRLF terminator
                 self.stream.write_all(b"\r\n").await?;
                 // Step 4: Encode each child frame
-                for frame in vec {
+                for element in elements {
                     // Box the recursive call so the future has a finite size.
                     // Pin the boxed future so it can be polled in place.
-                    Box::pin(self.write_data(frame)).await?;
+                    Box::pin(self.write_data(element)).await?;
                 }
             }
             Frame::Null => {
@@ -254,15 +253,16 @@ mod tests {
         // Step 1: Drop the client endpoint
         drop(client);
         // Step 2: Read a frame at the server endpoint
-        let dropped_frame = connection.read_frame().await?;
+        let eof_result = connection.read_frame().await?;
         // Step 3: Check the result
-        assert_eq!(dropped_frame, None);
+        assert_eq!(eof_result, None);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_connection_read_frame_oversize() -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn test_connection_read_frame_over_buffer_limit()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
         // Set up a connected pair of TCP streams.
         // Bind a TCP listener to an OS-assigned local port.
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -278,24 +278,25 @@ mod tests {
         // Complete RESP frame exceeding the buffer limit by one byte
         // Step 1: Send bytes from the client
         // The encoded frame exceeds the buffer limit by one byte.
-        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES + 1 - 3));
-        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES + 1);
-        client.write_all(payload.as_bytes()).await?;
+        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES + 1 - 3));
+        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES + 1);
+        client.write_all(encoded_frame.as_bytes()).await?;
         // Step 2: Read a frame at the server endpoint
         let oversized_frame = connection.read_frame().await;
         // Step 3: Check the result
         assert!(oversized_frame.is_err());
         assert_eq!(
             oversized_frame.unwrap_err().to_string(),
-            "Frame cannot fit within the buffer limit."
+            "Frame cannot fit within the buffer limit"
         );
-        assert!(connection.buffer.len() == config::MAX_BUFFERED_BYTES);
+        assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn test_connection_read_frame_incomplete() -> Result<(), Box<dyn Error + Send + Sync>> {
+    async fn test_connection_read_frame_unterminated_at_buffer_limit()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
         // Set up a connected pair of TCP streams.
         // Bind a TCP listener to an OS-assigned local port.
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -310,9 +311,9 @@ mod tests {
 
         // Step 1: Send bytes from the client
         // This unterminated input exceeds the buffer limit by one byte.
-        let payload = format!("+{}", "A".repeat(config::MAX_BUFFERED_BYTES));
-        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES + 1);
-        client.write_all(payload.as_bytes()).await?;
+        let incomplete_input = format!("+{}", "A".repeat(config::MAX_BUFFERED_BYTES));
+        assert_eq!(incomplete_input.len(), config::MAX_BUFFERED_BYTES + 1);
+        client.write_all(incomplete_input.as_bytes()).await?;
         // Step 2: Read a frame at the server endpoint
         let oversized_frame = timeout(Duration::from_millis(1000), connection.read_frame()).await?;
 
@@ -320,7 +321,7 @@ mod tests {
         assert!(oversized_frame.is_err());
         assert_eq!(
             oversized_frame.unwrap_err().to_string(),
-            "Frame cannot fit within the buffer limit."
+            "Frame cannot fit within the buffer limit"
         );
         assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
 
@@ -328,41 +329,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_connection_read_frame_maxsize() -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
-
-        // Step 1: Send bytes from the client
-        // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
-        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
-        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES);
-        client
-            .write_all(format!("{payload}:0\r\n").as_bytes())
-            .await?;
-        // Step 2: Read a frame at the server endpoint
-        let maxsized_frame = connection.read_frame().await?;
-        // Step 3: Check the result
-        assert_eq!(
-            maxsized_frame,
-            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
-        );
-        let next_frame = connection.read_frame().await?;
-        assert_eq!(next_frame, Some(Frame::Integer(0)));
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn test_connection_read_frame_maxsize_reversed()
+    async fn test_connection_read_frame_max_size_then_small()
     -> Result<(), Box<dyn Error + Send + Sync>> {
         // Set up a connected pair of TCP streams.
         // Bind a TCP listener to an OS-assigned local port.
@@ -378,18 +345,53 @@ mod tests {
 
         // Step 1: Send bytes from the client
         // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
-        let payload = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
-        assert_eq!(payload.len(), config::MAX_BUFFERED_BYTES);
+        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
         client
-            .write_all(format!(":0\r\n{payload}").as_bytes())
+            .write_all(format!("{encoded_frame}:0\r\n").as_bytes())
             .await?;
         // Step 2: Read a frame at the server endpoint
-        let front_frame = connection.read_frame().await?;
-        assert_eq!(front_frame, Some(Frame::Integer(0)));
-        let maxsized_frame = connection.read_frame().await?;
+        let max_size_frame = connection.read_frame().await?;
         // Step 3: Check the result
         assert_eq!(
-            maxsized_frame,
+            max_size_frame,
+            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
+        );
+        let next_frame = connection.read_frame().await?;
+        assert_eq!(next_frame, Some(Frame::Integer(0)));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_connection_read_frame_small_then_max_size()
+    -> Result<(), Box<dyn Error + Send + Sync>> {
+        // Set up a connected pair of TCP streams.
+        // Bind a TCP listener to an OS-assigned local port.
+        let listener = TcpListener::bind("127.0.0.1:0").await?;
+        // Read the listener's assigned address.
+        let listener_addr = listener.local_addr().unwrap();
+        // Connect a client endpoint to the listener.
+        let mut client = TcpStream::connect(listener_addr).await?;
+        // Accept the server endpoint of the connection.
+        let (server, _) = listener.accept().await?;
+        // Wrap the server endpoint in a `Connection`.
+        let mut connection = Connection::new(server);
+
+        // Step 1: Send bytes from the client
+        // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
+        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
+        client
+            .write_all(format!(":0\r\n{encoded_frame}").as_bytes())
+            .await?;
+        // Step 2: Read a frame at the server endpoint
+        let first_frame = connection.read_frame().await?;
+        assert_eq!(first_frame, Some(Frame::Integer(0)));
+        let max_size_frame = connection.read_frame().await?;
+        // Step 3: Check the result
+        assert_eq!(
+            max_size_frame,
             Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
         );
 

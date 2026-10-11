@@ -26,19 +26,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .expect("Failed to set tracing subscriber");
 
     // Step 0.3: Log the startup message
-    info!("Mini-Redis Server Daemon initializing...");
+    info!("Mini-Redis server starting");
 
     // Step 1: Initialize the shared server resources
     // Step 1.1: Create the shared database
-    let db = Database::new();
+    let database = Database::new();
 
     // Step 1.2: Create shutdown signaling and completion tracking
     // Broadcast capacity bounds the number of retained messages.
-    let (broadcast_tx, _broadcast_rx) =
-        broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
+    let (shutdown_tx, _shutdown_rx) = broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
     // Use sender lifetimes to track shutdown; no values are sent.
     // Capacity 1 is sufficient for this use.
-    let (mpsc_tx, mut mpsc_rx) = mpsc::channel::<()>(1);
+    let (shutdown_complete_tx, mut shutdown_complete_rx) = mpsc::channel::<()>(1);
 
     // Step 1.3: Bind the listener to the configured address
     let listener = TcpListener::bind(config::DEFAULT_SERVER_BIND_ADDR).await?;
@@ -48,9 +47,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let metrics = Arc::new(Metrics::new());
     let mut acceptor = Acceptor::new(
         listener,
-        db,
-        broadcast_tx.clone(),
-        mpsc_tx.clone(),
+        database,
+        shutdown_tx.clone(),
+        shutdown_complete_tx.clone(),
         config::DEFAULT_MAX_CONNECTIONS,
         config::DEFAULT_SERVER_READ_TIMEOUT,
         Arc::clone(&metrics),
@@ -61,28 +60,28 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::select! {
         // Accept loop completed; its result is ignored
         _ = acceptor.run() => {
-            tracing::info!("Task succesfully spawned for incoming Redis client");
+            info!("Accept loop finished");
         },
         // Ctrl+C received or signal-listener error
         _ = signal::ctrl_c() => {
-            tracing::info!("Shutdown signal received from OS");
+            info!("Ctrl+C listener finished; starting shutdown");
         }
     };
 
     // Step 3: Request shutdown and wait for sender cleanup
     // Step 3.1: Notify the subscribed handlers of shutdown
-    let _ = broadcast_tx.send(());
+    let _ = shutdown_tx.send(());
     // Step 3.2: Release resources owned outside the connection tasks
     // Drop the listener and the acceptor's channel sender clones.
     drop(acceptor);
-    drop(mpsc_tx);
+    drop(shutdown_complete_tx);
     // Step 3.3: Wait for connection-task senders to be dropped
     // No values are sent, so `recv()` returns `None` when all senders are gone.
     // Awaiting this closure suspends the main future while it is pending.
     // There is no timeout on this wait.
-    mpsc_rx.recv().await;
+    shutdown_complete_rx.recv().await;
     // Step 3.4: Log the shutdown status and final metrics
-    tracing::info!("All tasks are safely shut down.");
+    info!("Shutdown tracking channel closed");
     info!(
         active_connections = metrics.active_connections(),
         requests_received = metrics.requests_received(),

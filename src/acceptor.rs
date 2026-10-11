@@ -14,9 +14,9 @@ pub struct Acceptor {
     listener: TcpListener,
     database: Database,
     // Creates shutdown receivers for this acceptor and its handlers.
-    broadcast_tx: broadcast::Sender<()>,
+    shutdown_tx: broadcast::Sender<()>,
     // Keeps the shutdown-completion channel open; handlers receive clones.
-    mpsc_tx: mpsc::Sender<()>,
+    shutdown_complete_tx: mpsc::Sender<()>,
     semaphore: Arc<Semaphore>,
     // Supplies the frame-read timeout used by each handler.
     timeout_duration: Duration,
@@ -36,8 +36,8 @@ impl Acceptor {
     pub fn new(
         listener: TcpListener,
         database: Database,
-        broadcast_tx: broadcast::Sender<()>,
-        mpsc_tx: mpsc::Sender<()>,
+        shutdown_tx: broadcast::Sender<()>,
+        shutdown_complete_tx: mpsc::Sender<()>,
         max_connections: usize,
         timeout_duration: Duration,
         metrics: Arc<Metrics>,
@@ -45,8 +45,8 @@ impl Acceptor {
         Self {
             listener,
             database,
-            broadcast_tx,
-            mpsc_tx,
+            shutdown_tx,
+            shutdown_complete_tx,
             semaphore: Arc::new(Semaphore::new(max_connections)),
             timeout_duration,
             metrics,
@@ -74,7 +74,7 @@ impl Acceptor {
     /// their spawned tasks rather than returned by this method.
     pub async fn run(&mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
         // Step 1: Subscribe to shutdown notifications
-        let mut broadcast_rx_acceptor = self.broadcast_tx.subscribe();
+        let mut shutdown_rx = self.shutdown_tx.subscribe();
 
         // Step 2: Reserve a connection slot before each accept attempt
         loop {
@@ -85,58 +85,62 @@ impl Acceptor {
             // Neither branch has fixed priority when both are ready.
             tokio::select! {
                 // Accept operation completed
-                result = self.listener.accept() => {
-
+                accept_result = self.listener.accept() => {
                     // Step 4: Handle the accept result
-                    match result {
+                    let socket = match accept_result {
                         // Accepted connection
-                        Ok((socket, _)) => {
-
-                            // Step 5: Prepare shared handles for the task
-                            let db_clone = self.database.clone();
-                            let broadcast_rx_handler = self.broadcast_tx.subscribe();
-                            let mpsc_tx_clone = self.mpsc_tx.clone();
-                            let timeout_duration = self.timeout_duration;
-                            let metrics = self.metrics.clone();
-                            let _handle = tokio::spawn(async move {
-
-                                // Step 6: Create the handler with the permit
-                                // Dropping the handler releases its permit.
-                                let handler = Handler::new(
-                                    socket,
-                                    db_clone,
-                                    broadcast_rx_handler,
-                                    mpsc_tx_clone,
-                                    permit,
-                                    timeout_duration,
-                                    metrics,
-                                );
-                                // Run the handler and log any returned error.
-                                if let Err(error) = handler.run().await {
-                                    tracing::error!(%error, "Handler failed to execute");
-                                }
-                            });
-                        },
+                        Ok((socket, _)) => socket,
                         // Accept failed
                         Err(error) => {
                             // Count every accept failure.
                             self.metrics.inc_accept_errors();
+
                             match error.kind() {
                                 // Retry these errors immediately.
-                                std::io::ErrorKind::ConnectionAborted | std::io::ErrorKind::ConnectionReset => {},
+                                std::io::ErrorKind::ConnectionAborted
+                                | std::io::ErrorKind::ConnectionReset => {},
                                 // Log other errors and delay the next attempt.
                                 _ => {
-                                    tracing::error!(%error, "failed to accept connection");
+                                    tracing::error!(%error, "Failed to accept connection");
                                     sleep(config::ACCEPT_RETRY_DELAY).await;
                                 }
                             }
+
+                            // End this attempt and release its permit.
+                            continue;
                         }
-                    }
+                    };
+
+                    // Step 5: Prepare shared handles for the task
+                    let database = self.database.clone();
+                    let handler_shutdown_rx = self.shutdown_tx.subscribe();
+                    let shutdown_complete_tx = self.shutdown_complete_tx.clone();
+                    let timeout_duration = self.timeout_duration;
+                    let metrics = self.metrics.clone();
+
+                    let _handle = tokio::spawn(async move {
+                        // Step 6: Create the handler with the permit
+                        // Dropping the handler releases its permit.
+                        let handler = Handler::new(
+                            socket,
+                            database,
+                            handler_shutdown_rx,
+                            shutdown_complete_tx,
+                            permit,
+                            timeout_duration,
+                            metrics,
+                        );
+
+                        // Run the handler and log any returned error.
+                        if let Err(error) = handler.run().await {
+                            tracing::error!(%error, "Handler failed");
+                        }
+                    });
                 },
                 // Shutdown receive completed
-                _ = broadcast_rx_acceptor.recv() => {
+                _ = shutdown_rx.recv() => {
                     // Stop on either a message or a receive error.
-                    tracing::info!("Shutdown signal received from OS");
+                    tracing::info!("Acceptor stopping");
                     break;
                 }
             };

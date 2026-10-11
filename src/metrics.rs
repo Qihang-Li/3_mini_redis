@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 /// Each field uses atomic operations with `Relaxed` ordering. These operations
 /// do not synchronize other shared state. Reading several fields separately
 /// does not guarantee a snapshot from a single instant.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Metrics {
     active_connections: AtomicUsize,
     requests_received: AtomicUsize,
@@ -16,25 +16,11 @@ pub struct Metrics {
     accept_errors: AtomicUsize,
 }
 
-impl Default for Metrics {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Metrics {
     /// Creates metrics with every value initialized to zero.
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            active_connections: AtomicUsize::new(0),
-            requests_received: AtomicUsize::new(0),
-            command_responses_written: AtomicUsize::new(0),
-            cache_hits: AtomicUsize::new(0),
-            cache_misses: AtomicUsize::new(0),
-            command_parse_errors: AtomicUsize::new(0),
-            accept_errors: AtomicUsize::new(0),
-        }
+        Self::default()
     }
 
     /// Returns the number of handlers with a live `run()` guard.

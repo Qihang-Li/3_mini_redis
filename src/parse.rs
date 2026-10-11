@@ -11,8 +11,8 @@ impl std::error::Error for Error {}
 impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Error::EndOfStream => write!(f, "command ended early"),
-            Error::Other(err) => write!(f, "{err}"),
+            Error::EndOfStream => write!(f, "No more command arguments"),
+            Error::Other(message) => write!(f, "{message}"),
         }
     }
 }
@@ -31,12 +31,10 @@ impl Parse {
     /// Returns `Error::Other` if the input is not a `Frame::Array`.
     pub fn from_frame(frame: Frame) -> Result<Parse, Error> {
         match frame {
-            Frame::Array(vec) => Ok(Self {
-                parts: vec.into_iter(),
+            Frame::Array(elements) => Ok(Self {
+                parts: elements.into_iter(),
             }),
-            _ => Err(Error::Other(
-                "Wrong message: Invalid command, Frame::Array expected",
-            )),
+            _ => Err(Error::Other("Expected an array frame")),
         }
     }
 
@@ -56,9 +54,7 @@ impl Parse {
         match frame {
             Frame::Bulk(bytes) => Ok(bytes),
             Frame::Simple(string) => Ok(Bytes::from(string)),
-            _ => Err(Error::Other(
-                "Wrong message: Invalid command, Frame::Bulk expected",
-            )),
+            _ => Err(Error::Other("Expected a bulk or simple string argument")),
         }
     }
 
@@ -73,9 +69,7 @@ impl Parse {
     /// string, or if its contents are not valid UTF-8.
     pub fn next_string(&mut self) -> Result<String, Error> {
         let bytes = self.next_bytes()?;
-        let result = String::from_utf8(bytes.to_vec())
-            .map_err(|_| Error::Other("Wrong message: Invalid command, UTF-8 incompatible"))?;
-        Ok(result)
+        String::from_utf8(bytes.to_vec()).map_err(|_| Error::Other("Argument is not valid UTF-8"))
     }
 
     /// Checks that no arguments remain.
@@ -87,7 +81,7 @@ impl Parse {
     /// Returns `Error::Other` if an argument remains.
     pub fn finish(&mut self) -> Result<(), Error> {
         if self.parts.next().is_some() {
-            return Err(Error::Other("Wrong message: Redundant arguments"));
+            return Err(Error::Other("Unexpected extra argument"));
         }
         Ok(())
     }
@@ -108,19 +102,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_parse_new() {
+    fn test_parse_from_frame() {
         // Array input
         let valid_frame = Frame::Array(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Bulk(Bytes::from("42")),
         ]);
-        let valid_command = Parse::from_frame(valid_frame);
-        assert!(valid_command.is_ok());
+        let valid_parser_result = Parse::from_frame(valid_frame);
+        assert!(valid_parser_result.is_ok());
 
         // Non-array input
         let invalid_frame = Frame::Null;
-        let invalid_command = Parse::from_frame(invalid_frame);
-        assert!(matches!(invalid_command, Err(Error::Other(_))));
+        let invalid_parser_result = Parse::from_frame(invalid_frame);
+        assert!(matches!(invalid_parser_result, Err(Error::Other(_))));
     }
 
     #[test]
@@ -133,23 +127,23 @@ mod tests {
                 Frame::Error(String::from("HTTP 504")),
             ]),
         ]);
-        let mut command = Parse::from_frame(frame).unwrap();
+        let mut parser = Parse::from_frame(frame).unwrap();
 
         // Bulk-string argument
-        let valid_bulk_byte = command.next_bytes();
-        assert_eq!(valid_bulk_byte, Ok(Bytes::from("Hello, ")));
+        let bulk_result = parser.next_bytes();
+        assert_eq!(bulk_result, Ok(Bytes::from("Hello, ")));
 
         // Simple-string argument
-        let valid_simple_byte = command.next_bytes();
-        assert_eq!(valid_simple_byte, Ok(Bytes::from("World!")));
+        let simple_result = parser.next_bytes();
+        assert_eq!(simple_result, Ok(Bytes::from("World!")));
 
         // Unsupported argument type
-        let invalid_byte = command.next_bytes();
-        assert!(matches!(invalid_byte, Err(Error::Other(_))));
+        let invalid_result = parser.next_bytes();
+        assert!(matches!(invalid_result, Err(Error::Other(_))));
 
         // Exhausted argument iterator
-        let empty_byte = command.next_bytes();
-        assert_eq!(empty_byte, Err(Error::EndOfStream));
+        let exhausted_result = parser.next_bytes();
+        assert_eq!(exhausted_result, Err(Error::EndOfStream));
     }
 
     #[test]
@@ -159,36 +153,36 @@ mod tests {
             Frame::Simple(String::from("Tokio!")),
             Frame::Bulk(Bytes::from_static(b"\xF5\xFF")),
         ]);
-        let mut command = Parse::from_frame(frame).unwrap();
+        let mut parser = Parse::from_frame(frame).unwrap();
 
         // UTF-8 contents in a bulk string
-        let valid_bulk_string = command.next_string();
-        assert_eq!(valid_bulk_string, Ok(String::from("Hello, ")));
+        let bulk_result = parser.next_string();
+        assert_eq!(bulk_result, Ok(String::from("Hello, ")));
 
         // Contents of a simple string
-        let valid_simple_string = command.next_string();
-        assert_eq!(valid_simple_string, Ok(String::from("Tokio!")));
+        let simple_result = parser.next_string();
+        assert_eq!(simple_result, Ok(String::from("Tokio!")));
 
         // Invalid UTF-8 contents
-        let invalid_string = command.next_string();
-        assert!(matches!(invalid_string, Err(Error::Other(_))));
+        let invalid_result = parser.next_string();
+        assert!(matches!(invalid_result, Err(Error::Other(_))));
 
         // Exhausted argument iterator
-        let empty_string = command.next_string();
-        assert_eq!(empty_string, Err(Error::EndOfStream));
+        let exhausted_result = parser.next_string();
+        assert_eq!(exhausted_result, Err(Error::EndOfStream));
     }
 
     #[test]
     fn test_parse_finish() {
-        let mut parse = Parse::from_frame(Frame::Array(vec![Frame::Null])).unwrap();
+        let mut parser = Parse::from_frame(Frame::Array(vec![Frame::Null])).unwrap();
 
         // Unexpected remaining argument
-        let error_result = parse.finish();
+        let error_result = parser.finish();
         assert!(matches!(error_result, Err(Error::Other(_))));
 
         // Exhausted iterator
-        let _ = parse.parts.next();
-        let result = parse.finish();
+        let _ = parser.parts.next();
+        let result = parser.finish();
         assert!(result.is_ok());
     }
 }

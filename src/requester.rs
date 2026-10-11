@@ -31,20 +31,16 @@ impl Requester {
     ///
     /// Returns an error if the connection attempt fails or times out.
     pub async fn connect(
-        ip_addr: SocketAddr,
+        server_addr: SocketAddr,
         timeout_duration: Duration,
     ) -> Result<Self, Box<dyn Error + Send + Sync>> {
-        match timeout(timeout_duration, TcpStream::connect(ip_addr)).await {
-            // Connection established
-            Ok(Ok(socket)) => Ok(Self {
-                connection: Connection::new(socket),
-                timeout_duration,
-            }),
-            // Connection attempt failed
-            Ok(Err(error)) => Err(error.into()),
-            // Connection timeout
-            Err(elapsed) => Err(elapsed.into()),
-        }
+        // Propagate either a timeout or a connection error.
+        let socket = timeout(timeout_duration, TcpStream::connect(server_addr)).await??;
+
+        Ok(Self {
+            connection: Connection::new(socket),
+            timeout_duration,
+        })
     }
 
     /// Fetches the value associated with the given key from the server.
@@ -71,39 +67,27 @@ impl Requester {
         ]);
 
         // Step 2: Write and flush the command frame with a timeout
-        match timeout(
+        timeout(
             self.timeout_duration,
             self.connection.write_frame(&command_frame),
         )
-        .await
-        {
-            // Write completed
-            Ok(Ok(())) => (),
-            // Write failed
-            Ok(Err(error)) => return Err(error),
-            // Write timeout
-            Err(elapsed) => return Err(elapsed.into()),
-        }
+        .await??;
 
         // Step 3: Read the response frame with a fresh timeout
-        let response_frame =
-            match timeout(self.timeout_duration, self.connection.read_frame()).await {
-                // Complete response frame
-                Ok(Ok(Some(frame))) => frame,
-                // Server closed its sending side without a response
-                Ok(Ok(None)) => return Err("Client has disconnected".into()),
-                // Read, framing, or input-limit error
-                Ok(Err(error)) => return Err(error),
-                // Read timeout
-                Err(elapsed) => return Err(elapsed.into()),
-            };
+        let Some(response_frame) =
+            // Complete response frame on success
+            timeout(self.timeout_duration, self.connection.read_frame()).await??
+        else {
+            // Server closed its sending side without a response
+            return Err("Server closed its sending side before a response arrived".into());
+        };
 
         // Step 4: Interpret the response frame
         match response_frame {
             Frame::Bulk(bytes) => Ok(Some(bytes)),
             Frame::Null => Ok(None),
             Frame::Error(string) => Err(string.into()),
-            _ => Err("Protocol Error: Unexpected frame type".into()),
+            _ => Err("Unexpected response frame type".into()),
         }
     }
 
@@ -138,32 +122,20 @@ impl Requester {
         ]);
 
         // Step 2: Write and flush the command frame with a timeout
-        match timeout(
+        timeout(
             self.timeout_duration,
             self.connection.write_frame(&command_frame),
         )
-        .await
-        {
-            // Write completed
-            Ok(Ok(())) => (),
-            // Write failed
-            Ok(Err(error)) => return Err(error),
-            // Write timeout
-            Err(elapsed) => return Err(elapsed.into()),
-        }
+        .await??;
 
         // Step 3: Read the response frame with a fresh timeout
-        let response_frame =
-            match timeout(self.timeout_duration, self.connection.read_frame()).await {
-                // Complete response frame
-                Ok(Ok(Some(frame))) => frame,
-                // Server closed its sending side without a response
-                Ok(Ok(None)) => return Err("Client has disconnected".into()),
-                // Read, framing, or input-limit error
-                Ok(Err(error)) => return Err(error),
-                // Read timeout
-                Err(elapsed) => return Err(elapsed.into()),
-            };
+        let Some(response_frame) =
+            // Complete response frame on success
+            timeout(self.timeout_duration, self.connection.read_frame()).await??
+        else {
+            // Server closed its sending side without a response
+            return Err("Server closed its sending side before a response arrived".into());
+        };
 
         // Step 4: Interpret the response frame
         match response_frame {
@@ -175,7 +147,7 @@ impl Requester {
                 }
             }
             Frame::Error(string) => Err(string.into()),
-            _ => Err("Protocol Error: Unexpected frame type".into()),
+            _ => Err("Unexpected response frame type".into()),
         }
     }
 }

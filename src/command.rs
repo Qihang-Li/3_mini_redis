@@ -9,12 +9,12 @@ pub struct Get {
 }
 
 impl Get {
-    pub(crate) fn from_parse(parse: &mut Parse) -> Result<Self, Error> {
+    pub(crate) fn from_parse(parser: &mut Parse) -> Result<Self, Error> {
         // Step 1: Extract the key
-        let key = parse.next_string()?;
+        let key = parser.next_string()?;
 
         // Step 2: Check for extra arguments
-        parse.finish()?;
+        parser.finish()?;
 
         Ok(Self { key })
     }
@@ -27,13 +27,13 @@ pub struct Set {
 }
 
 impl Set {
-    pub(crate) fn from_parse(parse: &mut Parse) -> Result<Self, Error> {
+    pub(crate) fn from_parse(parser: &mut Parse) -> Result<Self, Error> {
         // Step 1: Extract the key and value
-        let key = parse.next_string()?;
-        let value = parse.next_bytes()?;
+        let key = parser.next_string()?;
+        let value = parser.next_bytes()?;
 
         // Step 2: Check for extra arguments
-        parse.finish()?;
+        parser.finish()?;
 
         Ok(Self { key, value })
     }
@@ -59,21 +59,19 @@ impl Command {
     /// is not valid UTF-8, or extra arguments remain.
     pub fn from_frame(frame: Frame) -> Result<Self, Error> {
         // Step 1: Create an argument parser from the frame
-        let mut parse = Parse::from_frame(frame)?;
+        let mut parser = Parse::from_frame(frame)?;
 
         // Step 2: Extract and normalize the command name
-        let command = parse.next_string()?.to_uppercase();
+        let command_name = parser.next_string()?.to_uppercase();
 
         // Step 3: Parse the arguments for the selected command
-        match command.as_str() {
+        match command_name.as_str() {
             // GET command
-            "GET" => Ok(Self::Get(Get::from_parse(&mut parse)?)),
+            "GET" => Ok(Self::Get(Get::from_parse(&mut parser)?)),
             // SET command
-            "SET" => Ok(Self::Set(Set::from_parse(&mut parse)?)),
+            "SET" => Ok(Self::Set(Set::from_parse(&mut parser)?)),
             // Unsupported command
-            _ => Err(Error::Other(
-                "Wrong message: Unsupported command, GET or SET expected",
-            )),
+            _ => Err(Error::Other("Unsupported command; expected GET or SET")),
         }
     }
 
@@ -106,8 +104,8 @@ mod tests {
     #[test]
     fn test_get_from_parse() {
         // Valid command
-        let mut valid_get_parse = Parse::new_test(vec![Frame::Bulk(Bytes::from("Answer"))]);
-        let valid_get_command = Get::from_parse(&mut valid_get_parse).unwrap();
+        let mut valid_get_parser = Parse::new_test(vec![Frame::Bulk(Bytes::from("Answer"))]);
+        let valid_get_command = Get::from_parse(&mut valid_get_parser).unwrap();
         assert_eq!(
             valid_get_command,
             Get {
@@ -116,12 +114,12 @@ mod tests {
         );
 
         // Extra argument
-        let mut superfluous_get_parse = Parse::new_test(vec![
+        let mut extra_argument_parser = Parse::new_test(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Error(String::from("me!")),
         ]);
-        let superfluous_get_command = Get::from_parse(&mut superfluous_get_parse);
-        assert!(matches!(superfluous_get_command, Err(Error::Other(_))));
+        let extra_argument_result = Get::from_parse(&mut extra_argument_parser);
+        assert!(matches!(extra_argument_result, Err(Error::Other(_))));
 
         // The tests in `parse.rs` cover argument-iterator exhaustion.
     }
@@ -129,11 +127,11 @@ mod tests {
     #[test]
     fn test_set_from_parse() {
         // Valid command
-        let mut valid_set_parse = Parse::new_test(vec![
+        let mut valid_set_parser = Parse::new_test(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Bulk(Bytes::from("42")),
         ]);
-        let valid_set_command = Set::from_parse(&mut valid_set_parse).unwrap();
+        let valid_set_command = Set::from_parse(&mut valid_set_parser).unwrap();
         assert_eq!(
             valid_set_command,
             Set {
@@ -143,13 +141,13 @@ mod tests {
         );
 
         // Extra argument
-        let mut superfluous_set_parse = Parse::new_test(vec![
+        let mut extra_argument_parser = Parse::new_test(vec![
             Frame::Bulk(Bytes::from("Answer")),
             Frame::Bulk(Bytes::from("42")),
             Frame::Null,
         ]);
-        let superfluous_set_command = Set::from_parse(&mut superfluous_set_parse);
-        assert!(matches!(superfluous_set_command, Err(Error::Other(_))));
+        let extra_argument_result = Set::from_parse(&mut extra_argument_parser);
+        assert!(matches!(extra_argument_result, Err(Error::Other(_))));
 
         // The tests in `parse.rs` cover argument-iterator exhaustion.
     }
@@ -187,39 +185,39 @@ mod tests {
         );
 
         // Unsupported command
-        let invalid_frame = Frame::Array(vec![
+        let unsupported_frame = Frame::Array(vec![
             Frame::Simple(String::from("sudo")),
             Frame::Bulk(Bytes::from("rm -rf /")),
         ]);
 
-        let invalid_command = Command::from_frame(invalid_frame);
-        assert!(matches!(invalid_command, Err(Error::Other(_))));
+        let unsupported_result = Command::from_frame(unsupported_frame);
+        assert!(matches!(unsupported_result, Err(Error::Other(_))));
     }
 
     #[test]
     fn test_command_apply() {
-        let test_db = Database::new();
+        let database = Database::new();
 
         // Store an entry
         let set_command = Command::Set(Set {
             key: String::from("Answer"),
             value: Bytes::from("42"),
         });
-        let set_resp_frame = set_command.apply(&test_db);
-        assert_eq!(set_resp_frame, Frame::Simple(String::from("OK")));
+        let set_response = set_command.apply(&database);
+        assert_eq!(set_response, Frame::Simple(String::from("OK")));
 
         // Retrieve an existing value
-        let get_valid_command = Command::Get(Get {
+        let existing_key_command = Command::Get(Get {
             key: String::from("Answer"),
         });
-        let get_valid_resp_frame = get_valid_command.apply(&test_db);
-        assert_eq!(get_valid_resp_frame, Frame::Bulk(Bytes::from("42")));
+        let existing_key_response = existing_key_command.apply(&database);
+        assert_eq!(existing_key_response, Frame::Bulk(Bytes::from("42")));
 
         // Look up a missing key
-        let get_invalid_command = Command::Get(Get {
+        let missing_key_command = Command::Get(Get {
             key: String::from("Alpha"),
         });
-        let get_invalid_resp_frame = get_invalid_command.apply(&test_db);
-        assert_eq!(get_invalid_resp_frame, Frame::Null);
+        let missing_key_response = missing_key_command.apply(&database);
+        assert_eq!(missing_key_response, Frame::Null);
     }
 }

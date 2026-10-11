@@ -4,15 +4,13 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug, Default)]
 pub struct Database {
-    rows: Arc<Mutex<HashMap<String, Bytes>>>,
+    entries: Arc<Mutex<HashMap<String, Bytes>>>,
 }
 
 impl Database {
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            rows: Arc::new(Mutex::new(HashMap::new())),
-        }
+        Self::default()
     }
 
     /// Retrieves the value associated with `key`.
@@ -25,9 +23,9 @@ impl Database {
     /// panics while holding the lock.
     #[must_use]
     pub fn get(&self, key: &str) -> Option<Bytes> {
-        let data = self.rows.lock().unwrap();
+        let entries = self.entries.lock().expect("Database mutex is poisoned");
         // Use the borrowed `key` without constructing an owned `String`.
-        data.get(key).cloned()
+        entries.get(key).cloned()
     }
 
     /// Inserts a key-value pair, replacing any existing value for the key.
@@ -36,8 +34,8 @@ impl Database {
     /// Panics if the database mutex is poisoned, typically after a thread
     /// panics while holding the lock.
     pub fn set(&self, key: String, value: Bytes) {
-        let mut data = self.rows.lock().unwrap();
-        data.insert(key, value);
+        let mut entries = self.entries.lock().expect("Database mutex is poisoned");
+        entries.insert(key, value);
     }
 }
 
@@ -48,55 +46,55 @@ mod tests {
 
     #[test]
     fn test_database_new() {
-        let test_db = Database::new();
-        let test_data = test_db.rows.lock().unwrap();
-        assert_eq!(test_data.len(), 0);
+        let database = Database::new();
+        let entries = database.entries.lock().unwrap();
+        assert_eq!(entries.len(), 0);
     }
 
     #[test]
     fn test_database_get() {
-        let test_db = Database::new();
+        let database = Database::new();
         {
-            test_db
-                .rows
+            database
+                .entries
                 .lock()
                 .unwrap()
                 .insert(String::from("Answer"), Bytes::from("42"));
         }
 
         // Retrieve an existing value
-        let valid_value = test_db.get("Answer").unwrap();
-        assert_eq!(valid_value, Bytes::from("42"));
+        let existing_value = database.get("Answer").unwrap();
+        assert_eq!(existing_value, Bytes::from("42"));
 
         // Look up a missing key
-        let invalid_value = test_db.get("Solution");
-        assert_eq!(invalid_value, None);
+        let missing_value = database.get("Solution");
+        assert_eq!(missing_value, None);
     }
 
     #[test]
     fn test_database_set() {
-        let test_db = Database::new();
+        let database = Database::new();
         {
-            test_db
-                .rows
+            database
+                .entries
                 .lock()
                 .unwrap()
                 .insert(String::from("Answer"), Bytes::from("42"));
         }
 
         // Overwrite an existing entry
-        test_db.set(String::from("Answer"), Bytes::from("Forty-two"));
+        database.set(String::from("Answer"), Bytes::from("Forty-two"));
         // Release this lock before the next call to `set`.
         {
-            let guard = test_db.rows.lock().unwrap();
-            let overwrite_value = guard.get("Answer").unwrap();
-            assert_eq!(*overwrite_value, Bytes::from("Forty-two"));
+            let guard = database.entries.lock().unwrap();
+            let updated_value = guard.get("Answer").unwrap();
+            assert_eq!(*updated_value, Bytes::from("Forty-two"));
         } // Dropping `guard` releases the mutex.
 
         // Add a new entry
-        test_db.set(String::from("Alpha"), Bytes::from("137"));
+        database.set(String::from("Alpha"), Bytes::from("137"));
         {
-            let guard = test_db.rows.lock().unwrap();
+            let guard = database.entries.lock().unwrap();
             let new_value = guard.get("Alpha").unwrap();
             assert_eq!(*new_value, Bytes::from("137"));
         }

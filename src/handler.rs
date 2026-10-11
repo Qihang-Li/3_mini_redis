@@ -34,9 +34,9 @@ impl Drop for ActiveConnectionGuard {
 pub struct Handler {
     connection: Connection,
     database: Database,
-    broadcast_rx: broadcast::Receiver<()>,
+    shutdown_rx: broadcast::Receiver<()>,
     // Holds a sender for shutdown tracking; no messages are sent here.
-    _mpsc_tx: mpsc::Sender<()>,
+    _shutdown_complete_tx: mpsc::Sender<()>,
     // Holds one connection slot until the handler is dropped.
     _permit: OwnedSemaphorePermit,
     // Applies to each frame read, including collection of partial input.
@@ -47,26 +47,25 @@ pub struct Handler {
 impl Handler {
     /// Creates a handler that owns the connection and its semaphore permit.
     ///
-    /// Keeps `_mpsc_tx` alive for shutdown tracking. `timeout_duration` applies
-    /// to each call that reads a complete frame.
+    /// Keeps `shutdown_complete_tx` alive for shutdown tracking.
+    /// `timeout_duration` applies to each call that reads a complete frame.
     ///
     /// The active connection count increases when `run()` starts executing.
-    #[allow(clippy::used_underscore_binding)]
     pub fn new(
         stream: TcpStream,
         database: Database,
-        broadcast_rx: broadcast::Receiver<()>,
-        _mpsc_tx: mpsc::Sender<()>,
-        _permit: OwnedSemaphorePermit,
+        shutdown_rx: broadcast::Receiver<()>,
+        shutdown_complete_tx: mpsc::Sender<()>,
+        permit: OwnedSemaphorePermit,
         timeout_duration: Duration,
         metrics: Arc<Metrics>,
     ) -> Self {
         Self {
             connection: Connection::new(stream),
             database,
-            broadcast_rx,
-            _mpsc_tx,
-            _permit,
+            shutdown_rx,
+            _shutdown_complete_tx: shutdown_complete_tx,
+            _permit: permit,
             timeout_duration,
             metrics,
         }
@@ -104,14 +103,13 @@ impl Handler {
             tokio::select! {
                 // Frame read or timeout completed
                 timeout_result = timeout(self.timeout_duration, self.connection.read_frame()) => {
-
                     // Step 3: Separate the read result from a timeout
                     let read_frame_result = match timeout_result {
                         // Read completed with a frame, EOF, or error
                         Ok(result) => result,
                         // Read timeout
                         Err(_elapsed) => {
-                            tracing::info!("Timeout error! Server idle for too long");
+                            tracing::info!("Frame read timed out");
                             break;
                         },
                     };
@@ -122,7 +120,7 @@ impl Handler {
                         Ok(Some(frame)) => frame,
                         // EOF with no incomplete frame buffered
                         Ok(None) => {
-                            tracing::info!("The client disconnected");
+                            tracing::info!("Client connection reached EOF");
                             break;
                         },
                         // Read, framing, or input-limit error
@@ -163,7 +161,7 @@ impl Handler {
                         Err(_) => {
                             // Count the invalid command before replying.
                             self.metrics.inc_command_parse_errors();
-                            Frame::Error("Wrong message: not a valid command".to_string())
+                            Frame::Error("Invalid command".to_string())
                         }
                     };
 
@@ -175,8 +173,8 @@ impl Handler {
                     self.metrics.inc_command_responses_written();
                 },
                 // Shutdown message or broadcast receive error
-                _ = self.broadcast_rx.recv() => {
-                    tracing::info!("Server shutdown signal received.");
+                _ = self.shutdown_rx.recv() => {
+                    tracing::info!("Handler stopping");
                     break;
                 },
             };
@@ -209,17 +207,16 @@ mod tests {
         // Share metrics between the handler and the assertions.
         let metrics = Arc::new(Metrics::new());
         // Keep the shutdown sender alive for the duration of the test.
-        let (_broadcast_tx, broadcast_rx) =
+        let (_shutdown_tx, shutdown_rx) =
             broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
 
         // Create a handler with one permit and an isolated database.
         let handler = Handler::new(
             server,
             Database::new(),
-            broadcast_rx,
+            shutdown_rx,
             mpsc::channel::<()>(1).0,
             Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
-                .clone()
                 .acquire_owned()
                 .await?,
             config::DEFAULT_SERVER_READ_TIMEOUT,
@@ -254,17 +251,16 @@ mod tests {
         // Share metrics between the handler and the assertions.
         let metrics = Arc::new(Metrics::new());
         // Keep the shutdown sender alive for the duration of the test.
-        let (_broadcast_tx, broadcast_rx) =
+        let (_shutdown_tx, shutdown_rx) =
             broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
 
         // Create a handler with one permit and an isolated database.
         let handler = Handler::new(
             server,
             Database::new(),
-            broadcast_rx,
+            shutdown_rx,
             mpsc::channel::<()>(1).0,
             Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
-                .clone()
                 .acquire_owned()
                 .await?,
             config::DEFAULT_SERVER_READ_TIMEOUT,
@@ -302,17 +298,16 @@ mod tests {
         // Share metrics between the handler and the assertions.
         let metrics = Arc::new(Metrics::new());
         // Keep the shutdown sender alive for the duration of the test.
-        let (_broadcast_tx, broadcast_rx) =
+        let (_shutdown_tx, shutdown_rx) =
             broadcast::channel::<()>(config::SHUTDOWN_BROADCAST_CAPACITY);
 
         // Create a handler with one permit and an isolated database.
         let handler = Handler::new(
             server,
             Database::new(),
-            broadcast_rx,
+            shutdown_rx,
             mpsc::channel::<()>(1).0,
             Arc::new(Semaphore::new(config::DEFAULT_MAX_CONNECTIONS))
-                .clone()
                 .acquire_owned()
                 .await?,
             config::DEFAULT_SERVER_READ_TIMEOUT,
