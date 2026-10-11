@@ -2,9 +2,9 @@ name: Rust CI
 
 on:
   push:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
   pull_request:
-    branches: [ "master", "main" ]
+    branches: ["master", "main"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,19 +14,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
-    - name: Install Rust toolchain
-      uses: dtolnay/rust-toolchain@stable
-      with:
-        components: clippy
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-    - name: Check compilation
-      run: cargo check
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-    - name: Run unit tests
-      run: cargo test
+      - name: Check compilation
+        run: cargo check --all-targets
 
-    - name: Enforce Pedantic Clippy
-      run: cargo clippy -- -D warnings -W clippy::pedantic
+      - name: Run tests
+        run: cargo test
+
+      - name: Enforce pedantic Clippy
+        run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
