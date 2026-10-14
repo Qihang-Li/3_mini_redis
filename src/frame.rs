@@ -243,20 +243,25 @@ impl Frame {
     ///
     /// Returns the line contents as a borrowed slice, excluding CRLF.
     /// On success, advances past CRLF without modifying the input bytes.
+    /// The returned contents contain neither CR nor LF.
     ///
     /// # Errors
-    /// Returns `Error::Incomplete` if no `\r` is found or the first `\r`
-    /// has no following byte.
-    /// Returns `Error::Other` if the byte after the first `\r` is not `\n`,
-    /// or if the cursor position cannot be represented as `usize`.
+    /// Returns `Error::Incomplete` if the scan reaches the end without finding
+    /// CR or LF, or encounters CR as the final available byte.
+    /// Returns `Error::Other` if the scan encounters a bare LF, a CR followed
+    /// by a byte other than LF, or an unrepresentable cursor position.
     fn get_line<'a>(src: &mut Cursor<&'a [u8]>) -> Result<&'a [u8], Error> {
         // Step 1: Borrow the unread bytes and record the cursor position
         let line = src.chunk();
         let start_position = usize::try_from(src.position())
             .map_err(|_| Error::Other("Cursor position cannot be represented as usize"))?;
 
-        // Step 2: Scan for a carriage return
+        // Step 2: Scan for CRLF, rejecting bare line feeds
         for index in 0..line.len() {
+            if line[index] == b'\n' {
+                return Err(Error::Other("Bare line feed in line"));
+            }
+
             if line[index] != b'\r' {
                 continue;
             }
@@ -380,18 +385,25 @@ mod tests {
         assert_eq!(superfluous_cursor.position(), 3);
 
         // Missing CRLF terminator
-        let inadequate_line = &b"Lorem Ipsum"[..];
+        let inadequate_line = &b"Lorem ipsum"[..];
         let mut inadequate_cursor = Cursor::new(inadequate_line);
         let inadequate_bytes = Frame::get_line(&mut inadequate_cursor);
         assert!(matches!(inadequate_bytes, Err(Error::Incomplete)));
         assert_eq!(inadequate_cursor.position(), 0);
 
-        // Carriage return not followed by line feed
-        let wrong_line = &b"dolor \rsit"[..];
-        let mut wrong_cursor = Cursor::new(wrong_line);
-        let wrong_bytes = Frame::get_line(&mut wrong_cursor);
-        assert!(matches!(wrong_bytes, Err(Error::Other(_))));
-        assert_eq!(wrong_cursor.position(), 0);
+        // Bare carriage return not followed by line feed
+        let bare_cr = &b"dolor \rsit amet"[..];
+        let mut bare_cr_cursor = Cursor::new(bare_cr);
+        let bare_cr_result = Frame::get_line(&mut bare_cr_cursor);
+        assert!(matches!(bare_cr_result, Err(Error::Other(_))));
+        assert_eq!(bare_cr_cursor.position(), 0);
+
+        // Bare line feed not after carriage return
+        let bare_lf = &b"consectetur \nadipiscing elit\r\n"[..];
+        let mut bare_lf_cursor = Cursor::new(bare_lf);
+        let bare_lf_result = Frame::get_line(&mut bare_lf_cursor);
+        assert!(matches!(bare_lf_result, Err(Error::Other(_))));
+        assert_eq!(bare_lf_cursor.position(), 0);
     }
 
     #[test]
@@ -639,11 +651,39 @@ mod tests {
         assert_eq!(empty_cursor.position(), 0);
 
         // Unknown frame marker
-        let wrong_1stbyte = &b"&hello world\r\n"[..];
+        let wrong_1stbyte = &b"&Lorem ipsum\r\n"[..];
         let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
         let wrong_1stbyte_result = Frame::check(&mut wrong_1stbyte_cursor);
         assert!(matches!(wrong_1stbyte_result, Err(Error::Other(_))));
         assert_eq!(wrong_1stbyte_cursor.position(), 1);
+
+        // Bare carriage return in simple string
+        let bare_cr_simple = &b"+dolor \rsit amet"[..];
+        let mut bare_cr_simple_cursor = Cursor::new(bare_cr_simple);
+        let bare_cr_simple_result = Frame::check(&mut bare_cr_simple_cursor);
+        assert!(matches!(bare_cr_simple_result, Err(Error::Other(_))));
+        assert_eq!(bare_cr_simple_cursor.position(), 1);
+
+        // Bare carriage return in error
+        let bare_cr_error = &b"-dolor \rsit amet"[..];
+        let mut bare_cr_error_cursor = Cursor::new(bare_cr_error);
+        let bare_cr_error_result = Frame::check(&mut bare_cr_error_cursor);
+        assert!(matches!(bare_cr_error_result, Err(Error::Other(_))));
+        assert_eq!(bare_cr_error_cursor.position(), 1);
+
+        // Bare line feed in simple string
+        let bare_lf_simple = &b"+consectetur \nadipiscing elit\r\n"[..];
+        let mut bare_lf_simple_cursor = Cursor::new(bare_lf_simple);
+        let bare_lf_simple_result = Frame::check(&mut bare_lf_simple_cursor);
+        assert!(matches!(bare_lf_simple_result, Err(Error::Other(_))));
+        assert_eq!(bare_lf_simple_cursor.position(), 1);
+
+        // Bare line feed in error
+        let bare_lf_error = &b"-consectetur \nadipiscing elit\r\n"[..];
+        let mut bare_lf_error_cursor = Cursor::new(bare_lf_error);
+        let bare_lf_error_result = Frame::check(&mut bare_lf_error_cursor);
+        assert!(matches!(bare_lf_error_result, Err(Error::Other(_))));
+        assert_eq!(bare_lf_error_cursor.position(), 1);
     }
 
     #[test]
@@ -790,19 +830,47 @@ mod tests {
 
     #[test]
     fn test_frame_parse_input_errors() {
+        // Empty input
+        let empty_input = &b""[..];
+        let mut empty_input_cursor = Cursor::new(empty_input);
+        let empty_input_frame = Frame::parse(&mut empty_input_cursor);
+        assert!(matches!(empty_input_frame, Err(Error::Incomplete)));
+
         // Unknown frame marker
-        let wrong_1stbyte = &b"&hello world\r\n"[..];
+        let wrong_1stbyte = &b"&Lorem ipsum\r\n"[..];
         let mut wrong_1stbyte_cursor = Cursor::new(wrong_1stbyte);
         let wrong_1stbyte_frame = Frame::parse(&mut wrong_1stbyte_cursor);
         assert!(matches!(wrong_1stbyte_frame, Err(Error::Other(_))));
         // Reading the frame marker advances the cursor by one byte.
         assert_eq!(wrong_1stbyte_cursor.position(), 1);
 
-        // Empty input
-        let empty_input = &b""[..];
-        let mut empty_input_cursor = Cursor::new(empty_input);
-        let empty_input_frame = Frame::parse(&mut empty_input_cursor);
-        assert!(matches!(empty_input_frame, Err(Error::Incomplete)));
+        // Bare carriage return in simple string
+        let bare_cr_simple = &b"+dolor \rsit amet"[..];
+        let mut bare_cr_simple_cursor = Cursor::new(bare_cr_simple);
+        let bare_cr_simple_result = Frame::parse(&mut bare_cr_simple_cursor);
+        assert!(matches!(bare_cr_simple_result, Err(Error::Other(_))));
+        assert_eq!(bare_cr_simple_cursor.position(), 1);
+
+        // Bare carriage return in error
+        let bare_cr_error = &b"-dolor \rsit amet"[..];
+        let mut bare_cr_error_cursor = Cursor::new(bare_cr_error);
+        let bare_cr_error_result = Frame::parse(&mut bare_cr_error_cursor);
+        assert!(matches!(bare_cr_error_result, Err(Error::Other(_))));
+        assert_eq!(bare_cr_error_cursor.position(), 1);
+
+        // Bare line feed in simple string
+        let bare_lf_simple = &b"+consectetur \nadipiscing elit\r\n"[..];
+        let mut bare_lf_simple_cursor = Cursor::new(bare_lf_simple);
+        let bare_lf_simple_result = Frame::parse(&mut bare_lf_simple_cursor);
+        assert!(matches!(bare_lf_simple_result, Err(Error::Other(_))));
+        assert_eq!(bare_lf_simple_cursor.position(), 1);
+
+        // Bare line feed in error
+        let bare_lf_error = &b"-consectetur \nadipiscing elit\r\n"[..];
+        let mut bare_lf_error_cursor = Cursor::new(bare_lf_error);
+        let bare_lf_error_result = Frame::parse(&mut bare_lf_error_cursor);
+        assert!(matches!(bare_lf_error_result, Err(Error::Other(_))));
+        assert_eq!(bare_lf_error_cursor.position(), 1);
     }
 
     #[test]
