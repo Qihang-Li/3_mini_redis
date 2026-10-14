@@ -48,8 +48,7 @@ pub enum Command {
 impl Command {
     /// Parses a `GET` or `SET` command from an array frame.
     ///
-    /// Command names are case-insensitive. Validates the required arguments
-    /// and rejects extra arguments.
+    /// Command names are matched case-insensitively using ASCII rules.
     ///
     /// # Errors
     /// Returns `Error::EndOfStream` if the command name or a required argument
@@ -61,18 +60,21 @@ impl Command {
         // Step 1: Create an argument parser from the frame
         let mut parser = Parse::from_frame(frame)?;
 
-        // Step 2: Extract and normalize the command name
-        let command_name = parser.next_string()?.to_uppercase();
+        // Step 2: Extract the command name
+        let command_name = parser.next_string()?;
 
         // Step 3: Parse the arguments for the selected command
-        match command_name.as_str() {
-            // GET command
-            "GET" => Ok(Self::Get(Get::from_parse(&mut parser)?)),
-            // SET command
-            "SET" => Ok(Self::Set(Set::from_parse(&mut parser)?)),
-            // Unsupported command
-            _ => Err(Error::Other("Unsupported command; expected GET or SET")),
+        if command_name.eq_ignore_ascii_case("GET") {
+            // Existing GET branch expression.
+            return Ok(Self::Get(Get::from_parse(&mut parser)?));
         }
+
+        if command_name.eq_ignore_ascii_case("SET") {
+            // Existing SET branch expression.
+            return Ok(Self::Set(Set::from_parse(&mut parser)?));
+        }
+
+        Err(Error::Other("Unsupported command; expected GET or SET"))
     }
 
     pub fn apply(self, database: &Database) -> Frame {
@@ -191,6 +193,16 @@ mod tests {
         ]);
 
         let unsupported_result = Command::from_frame(unsupported_frame);
+        assert!(matches!(unsupported_result, Err(Error::Other(_))));
+
+        // Unsupported letter
+        let unsupported_letter = Frame::Array(vec![
+            Frame::Bulk(Bytes::from("\u{017F}ET")),
+            Frame::Simple(String::from("Answer")),
+            Frame::Simple(String::from("42")),
+        ]);
+
+        let unsupported_result = Command::from_frame(unsupported_letter);
         assert!(matches!(unsupported_result, Err(Error::Other(_))));
     }
 
