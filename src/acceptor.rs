@@ -119,6 +119,16 @@ impl Acceptor {
                     let metrics = self.metrics.clone();
 
                     let _handle = tokio::spawn(async move {
+
+                        // Disable Nagle's algorithm so it does not delay small responses.
+                        if let Err(error) = socket.set_nodelay(true) {
+                            tracing::error!(%error, "Failed to enable TCP_NODELAY");
+
+                            // End only this task. Dropping the captured socket and permit
+                            // closes this connection and releases its connection slot.
+                            return;
+                        }
+
                         // Step 6: Create the handler with the permit
                         // Dropping the handler releases its permit.
                         let handler = Handler::new(
