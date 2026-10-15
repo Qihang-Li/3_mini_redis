@@ -55,16 +55,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Arc::clone(&metrics),
     );
 
-    // Step 2: Wait for the accept loop or Ctrl+C listener to finish
-    // The unselected future is dropped when a branch is selected.
-    tokio::select! {
-        // Accept loop completed; its result is ignored
-        _ = acceptor.run() => {
-            info!("Accept loop finished");
+    // Step 2: Wait for the accept loop or Ctrl+C listener to finish.
+    // The unselected future is dropped; spawned handlers still need shutdown.
+    // Preserve the selected result so the shared shutdown sequence runs
+    // before main returns success or failure.
+    let shutdown_result: Result<(), Box<dyn Error>> = tokio::select! {
+        // Handle successful completion or failure of the accept loop.
+        result = acceptor.run() => {
+            match result {
+                Ok(()) => {
+                    info!("Accept loop finished");
+                    Ok(())
+                },
+                Err(error) => {
+                    tracing::error!(%error, "Accept loop failed; starting shutdown");
+                    Err(error)
+                }
+            }
         },
-        // Ctrl+C received or signal-listener error
-        _ = signal::ctrl_c() => {
-            info!("Ctrl+C listener finished; starting shutdown");
+        // Handle a Ctrl+C notification or a signal-listener failure.
+        result = signal::ctrl_c() => {
+            match result {
+                Ok(()) => {
+                    info!("Ctrl+C listener finished; starting shutdown");
+                    Ok(())
+                },
+                Err(error) => {
+                    tracing::error!(%error, "Ctrl+C listener failed; starting shutdown");
+                    // Convert the I/O error to main's boxed error type.
+                    Err(error.into())
+                }
+            }
         }
     };
 
@@ -92,5 +113,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
         accept_errors = metrics.accept_errors(),
         "Final server metrics"
     );
-    Ok(())
+
+    shutdown_result
 }
