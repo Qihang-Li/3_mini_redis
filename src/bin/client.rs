@@ -7,7 +7,7 @@ use std::net::SocketAddr;
 
 #[derive(Parser, Debug)]
 struct Cli {
-    /// Server IP address and port, e.g. 127.0.0.1:6379 or [::1]:6379.
+    /// Server IP address and port, e.g. `127.0.0.1:6379` or `[::1]:6379`.
     /// Hostnames are not supported.
     #[clap(long, default_value = config::DEFAULT_CLIENT_ADDR)]
     addr: SocketAddr,

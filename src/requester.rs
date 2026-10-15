@@ -12,9 +12,11 @@ use tokio::time::{Duration, timeout};
 /// Each command applies `timeout_duration` separately to writing the request
 /// and reading the response. These operations do not share one deadline.
 ///
-/// After a command timeout, callers must drop this requester and reconnect.
-/// A timeout can leave a partial write or an unread response. This type does
-/// not close the connection or prevent further calls after a timeout.
+/// After a command timeout, or cancellation of a command future that has
+/// already been polled, drop this requester and reconnect.
+/// Either case may leave a partial request or an unread response.
+/// This type does not automatically close the connection or prevent reuse.
+/// Dropping a command future before its first poll performs no command I/O.
 #[derive(Debug)]
 pub struct Requester {
     connection: Connection,
@@ -48,7 +50,8 @@ impl Requester {
     /// Returns `Ok(Some(value))` for a bulk response, including an empty value.
     /// Returns `Ok(None)` for a null response, indicating a missing key.
     ///
-    /// Drop this requester and reconnect if the operation times out.
+    /// If this command times out or is cancelled after execution begins,
+    /// drop this requester and reconnect before issuing another command.
     ///
     /// # Errors
     ///
@@ -96,9 +99,10 @@ impl Requester {
     /// Returns `Ok(())` only for a simple-string response containing exactly
     /// `"OK"`.
     ///
-    /// A timeout does not establish whether the server applied the command.
-    /// Drop this requester and reconnect after a timeout; reconnecting does not
-    /// determine the outcome of the previous command.
+    /// A timeout or cancellation after execution begins does not establish
+    /// whether the server applied the command. Drop this requester and reconnect
+    /// before issuing another command; reconnecting does not determine the
+    /// outcome of the previous command.
     ///
     /// # Errors
     ///

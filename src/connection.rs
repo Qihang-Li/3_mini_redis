@@ -100,6 +100,10 @@ impl Connection {
     /// Success does not confirm that the peer has received or processed
     /// the frame.
     ///
+    /// Payloads of `Frame::Simple` and `Frame::Error` must contain neither CR
+    /// nor LF. This requirement also applies to frames nested within arrays.
+    /// This method does not validate that requirement.
+    ///
     /// # Errors
     /// Returns an error if writing or flushing the stream fails.
     pub async fn write_frame(&mut self, frame: &Frame) -> Result<(), Box<dyn Error + Send + Sync>> {
