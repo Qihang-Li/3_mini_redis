@@ -81,96 +81,104 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn test_high_concurrency_load() -> Result<(), Box<dyn Error>> {
-        // Step 1: Start the test server and prepare client-task tracking
-        // Allow 256 handlers, each with a 60-second frame-read timeout.
-        let (server_addr, shutdown_tx, mut shutdown_complete_rx, metrics, mut acceptor_handle) =
-            spawn_test_server(256, Duration::from_secs(60)).await?;
-        // Track client tasks so their completion and failures can be checked.
-        let mut client_tasks = JoinSet::new();
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 1: Start the test server and prepare client-task tracking
+            // Allow 256 handlers, each with a 60-second frame-read timeout.
+            let (server_addr, shutdown_tx, mut shutdown_complete_rx, metrics, mut acceptor_handle) =
+                spawn_test_server(256, Duration::from_secs(60)).await?;
+            // Track client tasks so their completion and failures can be checked.
+            let mut client_tasks = JoinSet::new();
 
-        // Step 2: Spawn 100 client tasks, each with its own SET/GET pair
-        for client_id in 1..=100 {
-            client_tasks.spawn(async move {
-                // Apply 500 ms separately to connecting, writing, and reading.
-                let mut requester = Requester::connect(server_addr, Duration::from_millis(500))
-                    .await
-                    .unwrap();
+            // Step 2: Spawn 100 client tasks, each with its own SET/GET pair
+            for client_id in 1..=100 {
+                client_tasks.spawn(async move {
+                    // Apply 500 ms separately to connecting, writing, and reading.
+                    let mut requester = Requester::connect(server_addr, Duration::from_millis(500))
+                        .await
+                        .unwrap();
 
-                // Use a unique key so clients do not overwrite each other.
-                let key = format!("key_{client_id}");
-                let value = Bytes::from(format!("val_{client_id}"));
+                    // Use a unique key so clients do not overwrite each other.
+                    let key = format!("key_{client_id}");
+                    let value = Bytes::from(format!("val_{client_id}"));
 
-                // Keep `value` available for comparison by passing a clone.
-                requester.set(&key, value.clone()).await.unwrap();
-                let returned_value = requester.get(&key).await.unwrap().unwrap();
+                    // Keep `value` available for comparison by passing a clone.
+                    requester.set(&key, value.clone()).await.unwrap();
+                    let returned_value = requester.get(&key).await.unwrap().unwrap();
 
-                // Verify that GET returns the value written by this client.
-                assert_eq!(returned_value, value);
+                    // Verify that GET returns the value written by this client.
+                    assert_eq!(returned_value, value);
 
-                // Release the client connection after verification.
-                // Server-side cleanup may finish later.
-                drop(requester);
-            });
-        }
-
-        // Step 3: Collect every client task result
-        // Tasks are returned in completion order.
-        while let Some(task_result) = client_tasks.join_next().await {
-            // Fail the test if a client task panicked or was cancelled.
-            task_result.unwrap();
-        }
-
-        // Step 4: Request shutdown and wait for completion-channel closure
-        let _ = shutdown_tx.send(());
-        // Give this channel wait its own one-second timeout.
-        match timeout(Duration::from_secs(1), shutdown_complete_rx.recv()).await {
-            // All completion senders have been dropped
-            Ok(None) => {}
-            // Unexpected message on a channel used only for sender tracking
-            Ok(Some(())) => {
-                // Request cancellation before reporting the channel misuse.
-                acceptor_handle.abort();
-                return Err("Unexpected message on shutdown completion channel".into());
+                    // Release the client connection after verification.
+                    // Server-side cleanup may finish later.
+                    drop(requester);
+                });
             }
-            // This wait timed out
-            Err(elapsed) => {
-                // Request cancellation before reporting the timeout.
-                acceptor_handle.abort();
-                return Err(format!(
-                    "Timed out waiting for shutdown completion channel closure: {elapsed}"
-                )
-                .into());
-            }
-        }
 
-        // Step 5: Join the acceptor task with a separate one-second timeout
-        match timeout(Duration::from_secs(1), &mut acceptor_handle).await {
-            // Wait completed, task joined, and acceptor returned success
-            Ok(Ok(Ok(()))) => {}
-            // Acceptor returned an error
-            Ok(Ok(Err(acceptor_error))) => {
-                let error: Box<dyn Error> = acceptor_error;
-                return Err(error);
+            // Step 3: Collect every client task result
+            // Tasks are returned in completion order.
+            while let Some(task_result) = client_tasks.join_next().await {
+                // Fail the test if a client task panicked or was cancelled.
+                task_result.unwrap();
             }
-            // Acceptor task panicked or was cancelled
-            Ok(Err(join_error)) => return Err(join_error.into()),
-            // This wait timed out
-            Err(elapsed) => {
-                // Request cancellation before reporting the timeout.
-                acceptor_handle.abort();
-                return Err(format!(
-                    "Timed out waiting for the acceptor task to finish: {elapsed}"
-                )
-                .into());
+
+            // Step 4: Request shutdown and wait for completion-channel closure
+            let _ = shutdown_tx.send(());
+            // Give this channel wait its own one-second timeout.
+            match timeout(Duration::from_secs(1), shutdown_complete_rx.recv()).await {
+                // All completion senders have been dropped
+                Ok(None) => {}
+                // Unexpected message on a channel used only for sender tracking
+                Ok(Some(())) => {
+                    // Request cancellation before reporting the channel misuse.
+                    acceptor_handle.abort();
+                    return Err("Unexpected message on shutdown completion channel".into());
+                }
+                // This wait timed out
+                Err(elapsed) => {
+                    // Request cancellation before reporting the timeout.
+                    acceptor_handle.abort();
+                    return Err(format!(
+                        "Timed out waiting for shutdown completion channel closure: {elapsed}"
+                    )
+                    .into());
+                }
             }
-        }
 
-        // Step 6: Check the final request counts and connection cleanup
-        // Each of 100 clients completed one SET and one GET.
-        assert_eq!(metrics.command_responses_written(), 200);
-        assert_eq!(metrics.requests_received(), 200);
-        assert_eq!(metrics.active_connections(), 0);
+            // Step 5: Join the acceptor task with a separate one-second timeout
+            match timeout(Duration::from_secs(1), &mut acceptor_handle).await {
+                // Wait completed, task joined, and acceptor returned success
+                Ok(Ok(Ok(()))) => {}
+                // Acceptor returned an error
+                Ok(Ok(Err(acceptor_error))) => {
+                    let error: Box<dyn Error> = acceptor_error;
+                    return Err(error);
+                }
+                // Acceptor task panicked or was cancelled
+                Ok(Err(join_error)) => return Err(join_error.into()),
+                // This wait timed out
+                Err(elapsed) => {
+                    // Request cancellation before reporting the timeout.
+                    acceptor_handle.abort();
+                    return Err(format!(
+                        "Timed out waiting for the acceptor task to finish: {elapsed}"
+                    )
+                    .into());
+                }
+            }
 
+            // Step 6: Check the final request counts and connection cleanup
+            // Each of 100 clients completed one SET and one GET.
+            assert_eq!(metrics.command_responses_written(), 200);
+            assert_eq!(metrics.requests_received(), 200);
+            assert_eq!(metrics.active_connections(), 0);
+
+            Ok::<(), Box<dyn Error>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 }

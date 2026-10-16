@@ -194,351 +194,383 @@ mod tests {
 
     #[tokio::test]
     async fn test_connection_new() -> Result<(), Box<dyn Error>> {
-        // Bind a TCP listener to an OS-assigned local port.
-        let test_listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let test_addr = test_listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let test_stream = TcpStream::connect(test_addr).await?;
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Create a listener and connect a client endpoint.
+            // Bind a TCP listener to an OS-assigned local port.
+            let test_listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let test_addr = test_listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let test_stream = TcpStream::connect(test_addr).await?;
 
-        // Check the initial read-buffer capacity.
-        let test_connection = Connection::new(test_stream);
-        assert_eq!(test_connection.buffer.capacity(), 4096);
+            // Check the initial read-buffer capacity.
+            let test_connection = Connection::new(test_stream);
+            assert_eq!(test_connection.buffer.capacity(), 4096);
 
+            Ok::<(), Box<dyn Error>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_read_frame() -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Complete simple-string frame
-        // Step 1: Send bytes from the client
-        client.write_all(b"+Hello, World!\r\n").await?;
-        // Step 2: Read a frame at the server endpoint
-        let valid_frame = connection.read_frame().await?;
-        // Step 3: Check the result
-        assert_eq!(
-            valid_frame,
-            Some(Frame::Simple("Hello, World!".to_string()))
-        );
+            // Complete simple-string frame
+            // Step 1: Send bytes from the client
+            client.write_all(b"+Hello, World!\r\n").await?;
+            // Step 2: Read a frame at the server endpoint
+            let valid_frame = connection.read_frame().await?;
+            // Step 3: Check the result
+            assert_eq!(
+                valid_frame,
+                Some(Frame::Simple("Hello, World!".to_string()))
+            );
 
-        // Array frame received across two writes
-        // Step 1: Send the first part of the array
-        client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
-        let partial_result = timeout(Duration::from_millis(100), connection.read_frame()).await;
-        // Expect the read to time out while the frame is incomplete.
-        assert!(partial_result.is_err());
-        assert_eq!(&connection.buffer[..], b"*2\r\n$3\r\nfoo\r\n");
+            // Array frame received across two writes
+            // Step 1: Send the first part of the array
+            client.write_all(b"*2\r\n$3\r\nfoo\r\n").await?;
+            let partial_result = timeout(Duration::from_millis(100), connection.read_frame()).await;
+            // Expect the read to time out while the frame is incomplete.
+            assert!(partial_result.is_err());
+            assert_eq!(&connection.buffer[..], b"*2\r\n$3\r\nfoo\r\n");
+            // Step 2: Send the remaining element and read the complete frame
+            client.write_all(b"$3\r\nbar\r\n").await?;
+            let final_result = connection.read_frame().await?;
+            // Step 3: Check the result
+            assert_eq!(
+                final_result,
+                Some(Frame::Array(vec![
+                    Frame::Bulk("foo".as_bytes().into()),
+                    Frame::Bulk("bar".as_bytes().into())
+                ]))
+            );
 
-        // Step 2: Send the remaining element and read the complete frame
-        client.write_all(b"$3\r\nbar\r\n").await?;
-        let final_result = timeout(Duration::from_millis(1000), connection.read_frame()).await??;
-        // Step 3: Check the result
-        assert_eq!(
-            final_result,
-            Some(Frame::Array(vec![
-                Frame::Bulk("foo".as_bytes().into()),
-                Frame::Bulk("bar".as_bytes().into())
-            ]))
-        );
+            // EOF after the client endpoint is dropped
+            // Step 1: Drop the client endpoint
+            drop(client);
+            // Step 2: Read a frame at the server endpoint
+            let eof_result = connection.read_frame().await?;
+            // Step 3: Check the result
+            assert_eq!(eof_result, None);
 
-        // EOF after the client endpoint is dropped
-        // Step 1: Drop the client endpoint
-        drop(client);
-        // Step 2: Read a frame at the server endpoint
-        let eof_result = connection.read_frame().await?;
-        // Step 3: Check the result
-        assert_eq!(eof_result, None);
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
 
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_read_frame_over_buffer_limit()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Complete RESP frame exceeding the buffer limit by one byte
-        // Step 1: Send bytes from the client
-        // The encoded frame exceeds the buffer limit by one byte.
-        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES + 1 - 3));
-        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES + 1);
-        client.write_all(encoded_frame.as_bytes()).await?;
-        // Step 2: Read a frame at the server endpoint
-        let oversized_frame = connection.read_frame().await;
-        // Step 3: Check the result
-        assert!(oversized_frame.is_err());
-        assert_eq!(
-            oversized_frame.unwrap_err().to_string(),
-            "Frame cannot fit within the buffer limit"
-        );
-        assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
+            // Complete RESP frame exceeding the buffer limit by one byte
+            // Step 1: Send bytes from the client
+            // The encoded frame exceeds the buffer limit by one byte.
+            let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES + 1 - 3));
+            assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES + 1);
+            client.write_all(encoded_frame.as_bytes()).await?;
+            // Step 2: Read a frame at the server endpoint
+            let oversized_frame = connection.read_frame().await;
+            // Step 3: Check the result
+            assert!(oversized_frame.is_err());
+            assert_eq!(
+                oversized_frame.unwrap_err().to_string(),
+                "Frame cannot fit within the buffer limit"
+            );
+            assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
 
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_read_frame_unterminated_at_buffer_limit()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Step 1: Send bytes from the client
-        // This unterminated input exceeds the buffer limit by one byte.
-        let incomplete_input = format!("+{}", "A".repeat(config::MAX_BUFFERED_BYTES));
-        assert_eq!(incomplete_input.len(), config::MAX_BUFFERED_BYTES + 1);
-        client.write_all(incomplete_input.as_bytes()).await?;
-        // Step 2: Read a frame at the server endpoint
-        let oversized_frame = timeout(Duration::from_millis(1000), connection.read_frame()).await?;
+            // Step 1: Send bytes from the client
+            // This unterminated input exceeds the buffer limit by one byte.
+            let incomplete_input = format!("+{}", "A".repeat(config::MAX_BUFFERED_BYTES));
+            assert_eq!(incomplete_input.len(), config::MAX_BUFFERED_BYTES + 1);
+            client.write_all(incomplete_input.as_bytes()).await?;
+            // Step 2: Read a frame at the server endpoint
+            let oversized_frame =
+                timeout(Duration::from_millis(1000), connection.read_frame()).await?;
+            // Step 3: Check the result
+            assert!(oversized_frame.is_err());
+            assert_eq!(
+                oversized_frame.unwrap_err().to_string(),
+                "Frame cannot fit within the buffer limit"
+            );
+            assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
 
-        // Step 3: Check the result
-        assert!(oversized_frame.is_err());
-        assert_eq!(
-            oversized_frame.unwrap_err().to_string(),
-            "Frame cannot fit within the buffer limit"
-        );
-        assert_eq!(connection.buffer.len(), config::MAX_BUFFERED_BYTES);
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
 
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_read_frame_max_size_then_small()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Step 1: Send bytes from the client
-        // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
-        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
-        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
-        client
-            .write_all(format!("{encoded_frame}:0\r\n").as_bytes())
-            .await?;
-        // Step 2: Read a frame at the server endpoint
-        let max_size_frame = connection.read_frame().await?;
-        // Step 3: Check the result
-        assert_eq!(
-            max_size_frame,
-            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
-        );
-        let next_frame = connection.read_frame().await?;
-        assert_eq!(next_frame, Some(Frame::Integer(0)));
+            // Step 1: Send bytes from the client
+            // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
+            let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+            assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
+            client
+                .write_all(format!("{encoded_frame}:0\r\n").as_bytes())
+                .await?;
+            // Step 2: Read a frame at the server endpoint
+            let max_size_frame = connection.read_frame().await?;
+            // Step 3: Check the result
+            assert_eq!(
+                max_size_frame,
+                Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
+            );
+            let next_frame = connection.read_frame().await?;
+            assert_eq!(next_frame, Some(Frame::Integer(0)));
 
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_read_frame_small_then_max_size()
     -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Step 1: Send bytes from the client
-        // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
-        let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
-        assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
-        client
-            .write_all(format!(":0\r\n{encoded_frame}").as_bytes())
-            .await?;
-        // Step 2: Read a frame at the server endpoint
-        let first_frame = connection.read_frame().await?;
-        assert_eq!(first_frame, Some(Frame::Integer(0)));
-        let max_size_frame = connection.read_frame().await?;
-        // Step 3: Check the result
-        assert_eq!(
-            max_size_frame,
-            Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
-        );
+            // Step 1: Send bytes from the client
+            // The encoded frame length equals `config::MAX_BUFFERED_BYTES`.
+            let encoded_frame = format!("+{}\r\n", "A".repeat(config::MAX_BUFFERED_BYTES - 3));
+            assert_eq!(encoded_frame.len(), config::MAX_BUFFERED_BYTES);
+            client
+                .write_all(format!(":0\r\n{encoded_frame}").as_bytes())
+                .await?;
+            // Step 2: Read a frame at the server endpoint
+            let first_frame = connection.read_frame().await?;
+            assert_eq!(first_frame, Some(Frame::Integer(0)));
+            let max_size_frame = connection.read_frame().await?;
+            // Step 3: Check the result
+            assert_eq!(
+                max_size_frame,
+                Some(Frame::Simple("A".repeat(config::MAX_BUFFERED_BYTES - 3)))
+            );
 
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 
     #[tokio::test]
     async fn test_connection_write_frame() -> Result<(), Box<dyn Error + Send + Sync>> {
-        // Set up a connected pair of TCP streams.
-        // Bind a TCP listener to an OS-assigned local port.
-        let listener = TcpListener::bind("127.0.0.1:0").await?;
-        // Read the listener's assigned address.
-        let listener_addr = listener.local_addr().unwrap();
-        // Connect a client endpoint to the listener.
-        let mut client = TcpStream::connect(listener_addr).await?;
-        // Accept the server endpoint of the connection.
-        let (server, _) = listener.accept().await?;
-        // Wrap the server endpoint in a `Connection`.
-        let mut connection = Connection::new(server);
+        // Keep connection setup, I/O, and assertions within one test scenario.
+        let scenario = async {
+            // Step 0: Set up a connected pair of TCP streams.
+            // Bind a TCP listener to an OS-assigned local port.
+            let listener = TcpListener::bind("127.0.0.1:0").await?;
+            // Read the listener's assigned address.
+            let listener_addr = listener.local_addr().unwrap();
+            // Connect a client endpoint to the listener.
+            let mut client = TcpStream::connect(listener_addr).await?;
+            // Accept the server endpoint of the connection.
+            let (server, _) = listener.accept().await?;
+            // Wrap the server endpoint in a `Connection`.
+            let mut connection = Connection::new(server);
 
-        // Simple-string frame
-        // Step 1: Write the frame from the server endpoint
-        connection
-            .write_frame(&Frame::Simple("Hello, World!".to_string()))
-            .await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_1 = b"+Hello, World!\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_1 = vec![0u8; expected_1.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_1),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert_eq!(buffer_1.as_slice(), expected_1);
+            // Simple-string frame
+            // Step 1: Write the frame from the server endpoint
+            connection
+                .write_frame(&Frame::Simple("Hello, World!".to_string()))
+                .await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_1 = b"+Hello, World!\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_1 = vec![0u8; expected_1.len()];
+            // Step 3: Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_1).await?;
+            // Step 4: Check the received bytes
+            assert_eq!(buffer_1.as_slice(), expected_1);
 
-        // Error frame
-        // Step 1: Write the frame from the server endpoint
-        connection
-            .write_frame(&Frame::Error("Error 404 Not Found".to_string()))
-            .await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_2 = b"-Error 404 Not Found\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_2 = vec![0u8; expected_2.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_2),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert_eq!(buffer_2.as_slice(), expected_2);
+            // Error frame
+            // Step 1: Write the frame from the server endpoint
+            connection
+                .write_frame(&Frame::Error("Error 404 Not Found".to_string()))
+                .await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_2 = b"-Error 404 Not Found\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_2 = vec![0u8; expected_2.len()];
+            // Step 3: Read the encoded bytes at the client with a timeout
+            // Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_2).await?;
+            // Step 4: Check the received bytes
+            assert_eq!(buffer_2.as_slice(), expected_2);
 
-        // Integer frame
-        // Step 1: Write the frame from the server endpoint
-        connection.write_frame(&Frame::Integer(42i64)).await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_3 = b":42\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_3 = vec![0u8; expected_3.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_3),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert_eq!(buffer_3.as_slice(), expected_3);
+            // Integer frame
+            // Step 1: Write the frame from the server endpoint
+            connection.write_frame(&Frame::Integer(42i64)).await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_3 = b":42\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_3 = vec![0u8; expected_3.len()];
+            // Step 3: Read the encoded bytes at the client with a timeout
+            // Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_3).await?;
+            // Step 4: Check the received bytes
+            assert_eq!(buffer_3.as_slice(), expected_3);
 
-        // Bulk-string frame
-        // Step 1: Write the frame from the server endpoint
-        connection
-            .write_frame(&Frame::Bulk("foobar".as_bytes().into()))
-            .await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_4 = b"$6\r\nfoobar\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_4 = vec![0u8; expected_4.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_4),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert_eq!(buffer_4.as_slice(), expected_4);
+            // Bulk-string frame
+            // Step 1: Write the frame from the server endpoint
+            connection
+                .write_frame(&Frame::Bulk("foobar".as_bytes().into()))
+                .await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_4 = b"$6\r\nfoobar\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_4 = vec![0u8; expected_4.len()];
+            // Step 3: Read the encoded bytes at the client with a timeout
+            // Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_4).await?;
+            // Step 4: Check the received bytes
+            assert_eq!(buffer_4.as_slice(), expected_4);
 
-        // Nested-array frame
-        // Step 1: Write the frame from the server endpoint
-        connection
-            .write_frame(&Frame::Array(vec![
-                Frame::Array(vec![
-                    Frame::Integer(1i64),
-                    Frame::Integer(2i64),
-                    Frame::Integer(3i64),
-                ]),
-                Frame::Array(vec![
-                    Frame::Simple("Foo".to_string()),
-                    Frame::Error("Bar".to_string()),
-                ]),
-            ]))
-            .await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_5 = b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_5 = vec![0u8; expected_5.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_5),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert_eq!(buffer_5.as_slice(), expected_5);
+            // Nested-array frame
+            // Step 1: Write the frame from the server endpoint
+            connection
+                .write_frame(&Frame::Array(vec![
+                    Frame::Array(vec![
+                        Frame::Integer(1i64),
+                        Frame::Integer(2i64),
+                        Frame::Integer(3i64),
+                    ]),
+                    Frame::Array(vec![
+                        Frame::Simple("Foo".to_string()),
+                        Frame::Error("Bar".to_string()),
+                    ]),
+                ]))
+                .await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_5 = b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_5 = vec![0u8; expected_5.len()];
+            // Step 3: Read the encoded bytes at the client with a timeout
+            // Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_5).await?;
+            // Step 4: Check the received bytes
+            assert_eq!(buffer_5.as_slice(), expected_5);
 
-        // Null frame
-        // Step 1: Write the frame from the server endpoint
-        connection.write_frame(&Frame::Null).await?;
-        // Step 2: Define the expected RESP bytes
-        let expected_bulk_null = b"$-1\r\n";
-        let expected_array_null = b"*-1\r\n";
-        // Allocate a receive buffer matching the expected byte count.
-        let mut buffer_6 = vec![0u8; expected_bulk_null.len()];
-        // Step 3: Read the encoded bytes at the client with a timeout
-        timeout(
-            Duration::from_millis(500),
-            // Read exactly the expected number of bytes.
-            client.read_exact(&mut buffer_6),
-        )
-        .await??;
-        // Step 4: Check the received bytes
-        assert!(
-            buffer_6.as_slice() == expected_bulk_null || buffer_6.as_slice() == expected_array_null
-        );
+            // Null frame
+            // Step 1: Write the frame from the server endpoint
+            connection.write_frame(&Frame::Null).await?;
+            // Step 2: Define the expected RESP bytes
+            let expected_bulk_null = b"$-1\r\n";
+            let expected_array_null = b"*-1\r\n";
+            // Allocate a receive buffer matching the expected byte count.
+            let mut buffer_6 = vec![0u8; expected_bulk_null.len()];
+            // Step 3: Read the encoded bytes at the client with a timeout
+            // Read exactly the expected number of encoded bytes.
+            client.read_exact(&mut buffer_6).await?;
+            // Step 4: Check the received bytes
+            assert!(
+                buffer_6.as_slice() == expected_bulk_null
+                    || buffer_6.as_slice() == expected_array_null
+            );
 
+            Ok::<(), Box<dyn Error + Send + Sync>>(())
+        };
+
+        // Give the complete scenario one shared five-second waiting budget.
+        // Propagate either timeout expiry or an error returned by the scenario.
+        timeout(Duration::from_secs(5), scenario).await??;
         Ok(())
     }
 }
