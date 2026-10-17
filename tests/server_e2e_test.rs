@@ -298,7 +298,7 @@ mod tests {
                 .write_all(b"*2\r\n$4\r\nDROP\r\n$5\r\nTABLE\r\n")
                 .await?;
             // Define the expected response bytes.
-            let expected_command_error = b"-Invalid command\r\n";
+            let expected_command_error = b"-Unsupported command; expected GET or SET\r\n";
             // Allocate space for exactly the expected response.
             let mut command_error_response = vec![0u8; expected_command_error.len()];
             // Read the complete expected response with a 500 ms timeout.

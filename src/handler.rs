@@ -88,7 +88,7 @@ impl Handler {
     ///
     /// Returns frame-reading errors, including invalid input, exceeded input
     /// limits, incomplete input at EOF, and I/O failures. Before returning a
-    /// read error, attempts an error response and ignores its write result.
+    /// read error, attempts an error response and logs any failure to write it.
     ///
     /// Also returns errors encountered while writing command responses.
     pub async fn run(mut self) -> Result<(), Box<dyn Error + Send + Sync>> {
@@ -127,10 +127,11 @@ impl Handler {
                         Err(error) => {
                             // Build a reply describing the read error.
                             let error_frame = Frame::Error(error.to_string());
-                            // Attempt the reply; ignore any write error.
-                            // This write is awaited without a timeout.
-                            let _ = self.connection.write_frame(&error_frame).await;
-                            // Return the original read error.
+                            // Attempt to report the read error to the client.
+                            if let Err(write_error) = self.connection.write_frame(&error_frame).await {
+                                tracing::warn!(%write_error, "Failed to send error response");
+                            }
+                            // Preserve the original read error as the handler's failure.
                             return Err(error);
                         }
                     };
@@ -158,10 +159,11 @@ impl Handler {
                         Ok(Command::Set(command)) => Command::Set(command).apply(&self.database),
 
                         // Complete frame containing an invalid command
-                        Err(_) => {
+                        Err(error) => {
                             // Count the invalid command before replying.
                             self.metrics.inc_command_parse_errors();
-                            Frame::Error("Invalid command".to_string())
+                            // Preserve the parser's diagnostic in the error response.
+                            Frame::Error(error.to_string())
                         }
                     };
 
