@@ -489,8 +489,7 @@ mod tests {
             let expected_2 = b"-Error 404 Not Found\r\n";
             // Allocate a receive buffer matching the expected byte count.
             let mut buffer_2 = vec![0u8; expected_2.len()];
-            // Step 3: Read the encoded bytes at the client with a timeout
-            // Read exactly the expected number of encoded bytes.
+            // Step 3: Read exactly the expected number of encoded bytes.
             client.read_exact(&mut buffer_2).await?;
             // Step 4: Check the received bytes
             assert_eq!(buffer_2.as_slice(), expected_2);
@@ -502,8 +501,7 @@ mod tests {
             let expected_3 = b":42\r\n";
             // Allocate a receive buffer matching the expected byte count.
             let mut buffer_3 = vec![0u8; expected_3.len()];
-            // Step 3: Read the encoded bytes at the client with a timeout
-            // Read exactly the expected number of encoded bytes.
+            // Step 3: Read exactly the expected number of encoded bytes.
             client.read_exact(&mut buffer_3).await?;
             // Step 4: Check the received bytes
             assert_eq!(buffer_3.as_slice(), expected_3);
@@ -517,8 +515,7 @@ mod tests {
             let expected_4 = b"$6\r\nfoobar\r\n";
             // Allocate a receive buffer matching the expected byte count.
             let mut buffer_4 = vec![0u8; expected_4.len()];
-            // Step 3: Read the encoded bytes at the client with a timeout
-            // Read exactly the expected number of encoded bytes.
+            // Step 3: Read exactly the expected number of encoded bytes.
             client.read_exact(&mut buffer_4).await?;
             // Step 4: Check the received bytes
             assert_eq!(buffer_4.as_slice(), expected_4);
@@ -542,8 +539,7 @@ mod tests {
             let expected_5 = b"*2\r\n*3\r\n:1\r\n:2\r\n:3\r\n*2\r\n+Foo\r\n-Bar\r\n";
             // Allocate a receive buffer matching the expected byte count.
             let mut buffer_5 = vec![0u8; expected_5.len()];
-            // Step 3: Read the encoded bytes at the client with a timeout
-            // Read exactly the expected number of encoded bytes.
+            // Step 3: Read exactly the expected number of encoded bytes.
             client.read_exact(&mut buffer_5).await?;
             // Step 4: Check the received bytes
             assert_eq!(buffer_5.as_slice(), expected_5);
@@ -556,8 +552,7 @@ mod tests {
             let expected_array_null = b"*-1\r\n";
             // Allocate a receive buffer matching the expected byte count.
             let mut buffer_6 = vec![0u8; expected_bulk_null.len()];
-            // Step 3: Read the encoded bytes at the client with a timeout
-            // Read exactly the expected number of encoded bytes.
+            // Step 3: Read exactly the expected number of encoded bytes.
             client.read_exact(&mut buffer_6).await?;
             // Step 4: Check the received bytes
             assert!(

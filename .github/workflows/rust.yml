@@ -26,10 +26,10 @@ jobs:
         run: cargo fmt --all -- --check
 
       - name: Check compilation
-        run: cargo check --all-targets
+        run: cargo check --all-targets --locked
 
       - name: Run tests
-        run: cargo test
+        run: cargo test --locked
 
       - name: Enforce pedantic Clippy
-        run: cargo clippy --all-targets -- -D warnings -W clippy::pedantic
+        run: cargo clippy --all-targets --locked -- -D warnings -W clippy::pedantic
